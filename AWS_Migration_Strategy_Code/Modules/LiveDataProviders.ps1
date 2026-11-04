@@ -457,7 +457,12 @@ function Get-VmImportDocText {
     $h = $Html
     foreach ($marker in @('id="main-col-body"', '<main', 'id="main-content"')) {
         $i = $h.IndexOf($marker, [System.StringComparison]::OrdinalIgnoreCase)
-        if ($i -ge 0) { $h = $h.Substring($i); break }
+        if ($i -ge 0) {
+            # Start at the '<' of the tag that holds the marker, so the rest of that tag is stripped as markup
+            $lt = $h.LastIndexOf('<', $i)
+            if ($lt -ge 0) { $i = $lt }
+            $h = $h.Substring($i); break
+        }
     }
     $h = [regex]::Replace($h, '(?is)<(script|style|noscript)[^>]*>.*?</\1>', ' ')
     $h = [regex]::Replace($h, '(?s)<[^>]+>', ' ')
