@@ -11,9 +11,13 @@ function Build-SummaryReport {
         [array]$StrategyRows = @(),
         # Optional: the rows for every OS field, so every strategy / readiness value that the client's
         # OS-field choice can produce gets a metric row (the exporter turns these counts into live formulas)
-        [array]$StrategyRowsAll = @()
+        [array]$StrategyRowsAll = @(),
+        # Optional: Get-VersionScenarioRows output - strategy / readiness values an exact-version choice can produce
+        # also get a metric row, and the number of VMs waiting for a version choice is counted
+        [array]$VersionScenarioRows = @()
     )
 
+    $VersionScenarioRows = @($VersionScenarioRows | Where-Object { $null -ne $_ })
     $totalVMs = $EC2Results.Count
     $flaggedOS = (@($EC2Results | Where-Object { $_.OS_Flag -like "*EOL*" })).Count
     $flaggedDEUnavailable = (@($EC2Results | Where-Object { $_.DE_Availability_Note -ne "" })).Count
@@ -32,6 +36,7 @@ function Build-SummaryReport {
     $strategyMetrics = @()
     if ($StrategyRows.Count -gt 0) {
         $allRows = if ($StrategyRowsAll.Count -gt 0) { $StrategyRowsAll } else { $StrategyRows }
+        if ($VersionScenarioRows.Count -gt 0) { $allRows = @($allRows) + @($VersionScenarioRows) }
         # the OS field most rows used (a row falls back to the other field only when the chosen one is blank)
         $usedField = @($StrategyRows | Where-Object { $_.OS_Source -in @('VMwareTools', 'ConfigFile') } | Group-Object OS_Source | Sort-Object Count -Descending | Select-Object -First 1 -ExpandProperty Name)
         $strategyMetrics += [PSCustomObject]@{ Metric = "OS field deciding the strategy (change it on sheet OS_Choice)"; Value = $(if ($usedField -eq 'ConfigFile') { 'Configuration file' } else { 'VMware Tools' }) }
@@ -43,6 +48,11 @@ function Build-SummaryReport {
         }
         $strategyMetrics += [PSCustomObject]@{ Metric = "VMs - Client confirmation needed"; Value = (@($StrategyRows | Where-Object { $_.Client_Confirmation -ne '' })).Count }
         $strategyMetrics += [PSCustomObject]@{ Metric = "VMs - Powered off, strategy to be reviewed with the client (rule R13)"; Value = (@($StrategyRows | Where-Object { $_.Rule_Applied -eq 'R13' })).Count }
+        if ($VersionScenarioRows.Count -gt 0) {
+            # the exporter turns this into a live count of 'Not checked yet' cells in column Exact_OS_Version
+            $waiting = @($VersionScenarioRows | ForEach-Object { $_.VMName } | Sort-Object -Unique).Count
+            $strategyMetrics += [PSCustomObject]@{ Metric = "VMs - Exact OS version not checked yet (sheet OS_Versions)"; Value = $waiting }
+        }
 
         # EC2 cost of the VMs that actually move to EC2 (Rehost / Replatform); Relocate goes to a VMware platform instead
         $toEc2 = @{}
