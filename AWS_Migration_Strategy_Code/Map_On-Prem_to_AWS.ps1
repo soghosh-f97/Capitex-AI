@@ -95,7 +95,8 @@ if ($dateChanges.Count -gt 0) { Write-Host ("  {0} OS support date(s) differ fro
 foreach ($m in @($LifecycleCatalog.Messages)) { Write-Host "  note: $m" -ForegroundColor DarkGray }
 
 # SupportCutoffDate may be relative ('today+12m'): resolved once, so every rule and sheet uses the same date
-$CutoffSetting = [string]$StrategySettings.SupportCutoffDate
+# The loader keeps the text as typed in SupportCutoffSetting (it may already have resolved SupportCutoffDate itself)
+$CutoffSetting = if ($StrategySettings.ContainsKey('SupportCutoffSetting') -and -not [string]::IsNullOrWhiteSpace([string]$StrategySettings.SupportCutoffSetting)) { [string]$StrategySettings.SupportCutoffSetting } else { [string]$StrategySettings.SupportCutoffDate }
 try { $StrategySettings['SupportCutoffDate'] = Resolve-SupportCutoffDate -Value $CutoffSetting -AsOf $StrategyAsOf }
 catch { Write-Error $_.Exception.Message; exit 1 }
 Write-Host ("  Support cut-off date (R06): {0}{1}" -f $StrategySettings.SupportCutoffDate, $(if ($CutoffSetting -ne $StrategySettings.SupportCutoffDate) { " (from '$CutoffSetting')" } else { '' }))

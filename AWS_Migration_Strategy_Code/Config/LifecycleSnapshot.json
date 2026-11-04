@@ -232,7 +232,8 @@
       "eoasFrom": null,
       "eolFrom": "2025-10-14",
       "eoesFrom": "2028-10-10",
-      "source": "offline snapshot 2026-11-04 - verify"
+      "source": "offline snapshot 2026-11-04 - verify",
+      "note": "Commercial ESU (paid, organisations) to 10 Oct 2028; consumer ESU ended 13 Oct 2026"
      },
      {
       "name": "10-21h2-e",
@@ -291,6 +292,16 @@
       "isLts": true,
       "eoasFrom": "2021-10-12",
       "eolFrom": "2026-10-13",
+      "eoesFrom": null,
+      "source": "offline snapshot 2026-11-04 - verify"
+     },
+     {
+      "name": "10-1507-e-lts",
+      "label": "10 1507 (E) (LTSB)",
+      "releaseDate": "2015-07-29",
+      "isLts": true,
+      "eoasFrom": "2020-10-13",
+      "eolFrom": "2025-10-14",
       "eoesFrom": null,
       "source": "offline snapshot 2026-11-04 - verify"
      },
@@ -526,8 +537,8 @@
       "isLts": true,
       "eoasFrom": null,
       "eolFrom": "2029-04-30",
-      "eoesFrom": "2034-05-30",
-      "source": "offline snapshot 2026-11-04 - verify"
+      "eoesFrom": "2034-04-30",
+      "source": "offline snapshot 2026-11-04 - verify (Canonical: ESM ends April)"
      },
      {
       "name": "22.04",
@@ -536,8 +547,8 @@
       "isLts": true,
       "eoasFrom": null,
       "eolFrom": "2027-04-30",
-      "eoesFrom": "2032-05-30",
-      "source": "offline snapshot 2026-11-04 - verify"
+      "eoesFrom": "2032-04-30",
+      "source": "offline snapshot 2026-11-04 - verify (Canonical: ESM ends April)"
      },
      {
       "name": "20.04",
@@ -546,8 +557,8 @@
       "isLts": true,
       "eoasFrom": null,
       "eolFrom": "2025-05-31",
-      "eoesFrom": "2030-05-30",
-      "source": "offline snapshot 2026-11-04 - verify"
+      "eoesFrom": "2030-04-30",
+      "source": "offline snapshot 2026-11-04 - verify (Canonical: ESM ends April)"
      },
      {
       "name": "18.04",
@@ -556,8 +567,8 @@
       "isLts": true,
       "eoasFrom": null,
       "eolFrom": "2023-05-31",
-      "eoesFrom": "2028-05-30",
-      "source": "offline snapshot 2026-11-04 - verify"
+      "eoesFrom": "2028-04-30",
+      "source": "offline snapshot 2026-11-04 - verify (Canonical: ESM ends April)"
      },
      {
       "name": "16.04",

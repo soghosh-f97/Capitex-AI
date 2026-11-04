@@ -37,10 +37,10 @@
         Enabled              = $true      # $true = read OS support dates and Windows versions from endoflife.date and check the AWS VM Import page; $false = never use the internet (offline snapshot + dates below).
         CacheDays            = 7          # Days a downloaded copy is reused before it is downloaded again (an older copy is still used, with a warning, when the internet is not reachable).
         LifecycleApiBase     = 'https://endoflife.date/api/v1/products'   # OS support dates API (no login). Products used: the 'Live' keys of OsLifecycle and VersionChoices.
-        LifecycleLegacyBase  = 'https://endoflife.date/api'               # Older version of the same API, tried when the first one fails.
+        LifecycleLegacyBase  = 'https://endoflife.date/api'               # Older version of the same API, tried only when the first one answers 404 or an unexpected format.
         VmImportDocUrl       = 'https://docs.aws.amazon.com/vm-import/latest/userguide/prerequisites.html'   # AWS VM Import rules page (no API exists): its text is hashed to detect changes.
         VmImportDocKnownHash = ''         # SHA-256 of the VM Import page text when sections 7-8 were last reviewed ('' = not recorded yet; the run prints the current hash on Data_Sources).
-        TimeoutSec           = 30         # Seconds to wait for each live source before falling back.
+        TimeoutSec           = 20         # Seconds to wait for each live source. After the first 'no answer' (timeout, DNS, refused, proxy) the host is skipped for the rest of the run.
     }
 
     #---------------------------------------------------------------------------------------------
@@ -137,10 +137,11 @@
     #    OUTSIDE Azure (Microsoft ESU / Red Hat ELS / SUSE LTSS / Ubuntu Pro); '' = none / not tracked.
     #    First match wins - keep specific patterns above generic ones. Review dates before each run.
     #    Live = '<product>:<release>' (endoflife.date) -> EndOfSupport / ExtendedEnd are refreshed from the API at run time;
-    #    the dates typed here are the fallback. An empty live value never erases a date typed here. LiveEndField = 'eoes'
+    #    the dates typed here are the fallback. LiveAlt = alternatives separated by '|' (tried in order when Live is not found) cover
+    #    release names that may differ (e.g. LiveAlt = 'windows:10-22h2-e|windows:10-22h2-w'). No Live key = the dates here are always used. An empty live value never erases a date typed here. LiveEndField = 'eoes'
     #    takes the API's extended (LTS) end as EndOfSupport, for rows whose support end here is the free LTS end (Debian).
     #---------------------------------------------------------------------------------------------
-    SupportCutoffDate      = '2027-12-31'      # [R06] Cut-off date: an OS whose support ends before it counts as old. A fixed date 'yyyy-MM-dd', or relative to the run date: 'today+12m' (months) / 'today+2y' (years).
+    SupportCutoffDate      = '2027-12-31'      # [R06] Cut-off date: an OS whose support ends before it counts as old. A fixed date 'yyyy-MM-dd', or relative to the run date: 'today+12m' (months) / 'today+2y' (years) / 'today-6m'.
     LegacyOsStrategy       = 'Replatform'      # [R06] Strategy for an old OS: 'Replatform' (upgrade/rebuild in the move) or 'Rehost' (move as-is, upgrade later).
     PreferRelocateForLegacyOS = $false         # [R06] $true = OS past ALL support goes to Relocate (VMware in AWS) instead; script switch can force it on.
     RelocateTarget         = 'Amazon Elastic VMware Service (Amazon EVS) or VMware Cloud on AWS, via VMware HCX'   # [R06] AWS target text for Relocate.
@@ -149,20 +150,20 @@
     Arch32BitNote          = 'AWS VM Import stopped accepting 32-bit (i386) images on 1 Apr 2026'   # [R06] Reason text shown for 32-bit VMs.
     # [R06] Support end dates per OS version (yyyy-MM-dd; '' = none/unknown); sets OS_Status. First match wins.
     OsLifecycle = @(
-        @{ Match = 'Windows Server\D*2003|Windows (NT|2000|XP|Vista)\b'; Label = 'Windows Server 2003 / XP or older'; EndOfSupport = '2015-07-14'; ExtendedEnd = '';           Live = 'windows-server:2003-r2-sp2'; Note = 'No extended support available' }
-        @{ Match = 'Windows Server\D*2008';                  Label = 'Windows Server 2008 / 2008 R2'; EndOfSupport = '2020-01-14'; ExtendedEnd = '2023-01-10'; Live = 'windows-server:2008-r2-sp1'; Note = 'ESU ended Jan 2023 outside Azure' }
-        @{ Match = 'Windows Server\D*2012';                  Label = 'Windows Server 2012 / 2012 R2'; EndOfSupport = '2023-10-10'; ExtendedEnd = '2026-10-13'; Live = 'windows-server:2012-r2'; Note = 'Paid ESU ended Oct 2026' }
+        @{ Match = 'Windows Server\D*2003|Windows (NT|2000|XP|Vista)\b'; Label = 'Windows Server 2003 / XP or older'; EndOfSupport = '2015-07-14'; ExtendedEnd = '';           Live = 'windows-server:2003-r2-sp2'; LiveAlt = 'windows-server:2003-sp2|windows-server:2003'; Note = 'No extended support available' }
+        @{ Match = 'Windows Server\D*2008';                  Label = 'Windows Server 2008 / 2008 R2'; EndOfSupport = '2020-01-14'; ExtendedEnd = '2023-01-10'; Note = 'ESU ended Jan 2023 outside Azure' }   # no Live key: the API may give the Azure-only 4th ESU year (Jan 2024)
+        @{ Match = 'Windows Server\D*2012';                  Label = 'Windows Server 2012 / 2012 R2'; EndOfSupport = '2023-10-10'; ExtendedEnd = '2026-10-13'; Live = 'windows-server:2012-r2'; LiveAlt = 'windows-server:2012'; Note = 'Paid ESU ended Oct 2026' }
         @{ Match = 'Windows Server\D*2016 or later';         Label = 'Windows Server 2016 or later (exact version unknown)'; EndOfSupport = ''; ExtendedEnd = ''; Note = 'Grouped VMware label - confirm the exact version' }
         @{ Match = 'Windows Server\D*2016';                  Label = 'Windows Server 2016';           EndOfSupport = '2027-01-12'; ExtendedEnd = '';           Live = 'windows-server:2016'; Note = '' }
         @{ Match = 'Windows Server\D*2019';                  Label = 'Windows Server 2019';           EndOfSupport = '2029-01-09'; ExtendedEnd = '';           Live = 'windows-server:2019'; Note = '' }
         @{ Match = 'Windows Server\D*2022';                  Label = 'Windows Server 2022';           EndOfSupport = '2031-10-14'; ExtendedEnd = '';           Live = 'windows-server:2022'; Note = '' }
         @{ Match = 'Windows Server\D*2025';                  Label = 'Windows Server 2025';           EndOfSupport = '2034-11-14'; ExtendedEnd = '';           Live = 'windows-server:2025'; Note = '' }
-        @{ Match = 'Windows 7\b';                            Label = 'Windows 7';                     EndOfSupport = '2020-01-14'; ExtendedEnd = '2023-01-10'; Live = 'windows:7-sp1'; Note = 'ESU ended Jan 2023' }
-        @{ Match = 'Windows 8';                              Label = 'Windows 8 / 8.1';               EndOfSupport = '2023-01-10'; ExtendedEnd = '';           Live = 'windows:8.1'; Note = '' }
-        @{ Match = 'Windows 10\b';                           Label = 'Windows 10';                    EndOfSupport = '2025-10-14'; ExtendedEnd = '2028-10-10'; Live = 'windows:10-22h2'; Note = 'Paid ESU per device (free only on Microsoft clouds)' }
+        @{ Match = 'Windows 7\b';                            Label = 'Windows 7';                     EndOfSupport = '2020-01-14'; ExtendedEnd = '2023-01-10'; Live = 'windows:7-sp1'; LiveAlt = 'windows:7'; Note = 'ESU ended Jan 2023' }
+        @{ Match = 'Windows 8';                              Label = 'Windows 8 / 8.1';               EndOfSupport = '2023-01-10'; ExtendedEnd = '';           Live = 'windows:8.1'; LiveAlt = 'windows:8-1|windows:8'; Note = '' }
+        @{ Match = 'Windows 10\b';                           Label = 'Windows 10';                    EndOfSupport = '2025-10-14'; ExtendedEnd = '2028-10-10'; Live = 'windows:10-22h2'; LiveAlt = 'windows:10-22h2-e|windows:10-22h2-w'; Note = 'Commercial ESU (paid, organisations) to Oct 2028; consumer ESU ended 13 Oct 2026' }
         @{ Match = 'Windows 11\b';                           Label = 'Windows 11';                    EndOfSupport = '';           ExtendedEnd = '';           Note = 'Support depends on the feature-update version' }
         @{ Match = '(Red Hat Enterprise Linux|RHEL)\D*\b[2-5](\.\d+)?\b'; Label = 'RHEL 5 or older'; EndOfSupport = '2017-03-31'; ExtendedEnd = '2020-11-30'; Live = 'rhel:5'; Note = '' }
-        @{ Match = '(Red Hat Enterprise Linux|RHEL)\D*\b6(\.\d+)?\b';    Label = 'RHEL 6';          EndOfSupport = '2020-11-30'; ExtendedEnd = '2024-06-30'; Live = 'rhel:6'; Note = 'ELS ended Jun 2024' }
+        @{ Match = '(Red Hat Enterprise Linux|RHEL)\D*\b6(\.\d+)?\b';    Label = 'RHEL 6';          EndOfSupport = '2020-11-30'; ExtendedEnd = '2024-06-30'; Live = 'rhel:6'; Note = 'ELS ended Jun 2024 (verify: Red Hat may offer a longer ELS)' }
         @{ Match = '(Red Hat Enterprise Linux|RHEL)\D*\b7(\.\d+)?\b';    Label = 'RHEL 7';          EndOfSupport = '2024-06-30'; ExtendedEnd = '2028-06-30'; Live = 'rhel:7'; Note = 'ELS add-on required' }
         @{ Match = '(Red Hat Enterprise Linux|RHEL)\D*\b8(\.\d+)?\b';    Label = 'RHEL 8';          EndOfSupport = '2029-05-31'; ExtendedEnd = '2032-05-31'; Live = 'rhel:8'; Note = '' }
         @{ Match = '(Red Hat Enterprise Linux|RHEL)\D*\b9(\.\d+)?\b';    Label = 'RHEL 9';          EndOfSupport = '2032-05-31'; ExtendedEnd = '2035-05-31'; Live = 'rhel:9'; Note = '' }
@@ -179,10 +180,10 @@
         @{ Match = 'Debian\D*\b12(\.\d+)?\b';                Label = 'Debian 12';                    EndOfSupport = '2028-06-30'; ExtendedEnd = '';           Live = 'debian:12'; LiveEndField = 'eoes'; Note = '' }
         @{ Match = 'Debian\D*\b13(\.\d+)?\b';                Label = 'Debian 13';                    EndOfSupport = '2030-06-30'; ExtendedEnd = '';           Live = 'debian:13'; LiveEndField = 'eoes'; Note = '' }
         @{ Match = 'Ubuntu\D*(1[0-6]\.\d+)';                 Label = 'Ubuntu 16.04 or older';        EndOfSupport = '2021-04-30'; ExtendedEnd = '';           Live = 'ubuntu:16.04'; Note = '' }
-        @{ Match = 'Ubuntu\D*18\.04';                        Label = 'Ubuntu 18.04 LTS';             EndOfSupport = '2023-05-31'; ExtendedEnd = '2028-05-30'; Live = 'ubuntu:18.04'; Note = 'Ubuntu Pro ESM required' }
-        @{ Match = 'Ubuntu\D*20\.04';                        Label = 'Ubuntu 20.04 LTS';             EndOfSupport = '2025-05-31'; ExtendedEnd = '2030-05-30'; Live = 'ubuntu:20.04'; Note = 'Ubuntu Pro ESM required' }
-        @{ Match = 'Ubuntu\D*22\.04';                        Label = 'Ubuntu 22.04 LTS';             EndOfSupport = '2027-04-30'; ExtendedEnd = '2032-05-30'; Live = 'ubuntu:22.04'; Note = '' }
-        @{ Match = 'Ubuntu\D*24\.04';                        Label = 'Ubuntu 24.04 LTS';             EndOfSupport = '2029-04-30'; ExtendedEnd = '2034-05-30'; Live = 'ubuntu:24.04'; Note = '' }
+        @{ Match = 'Ubuntu\D*18\.04';                        Label = 'Ubuntu 18.04 LTS';             EndOfSupport = '2023-05-31'; ExtendedEnd = '2028-04-30'; Live = 'ubuntu:18.04'; Note = 'Ubuntu Pro ESM required' }
+        @{ Match = 'Ubuntu\D*20\.04';                        Label = 'Ubuntu 20.04 LTS';             EndOfSupport = '2025-05-31'; ExtendedEnd = '2030-04-30'; Live = 'ubuntu:20.04'; Note = 'Ubuntu Pro ESM required' }
+        @{ Match = 'Ubuntu\D*22\.04';                        Label = 'Ubuntu 22.04 LTS';             EndOfSupport = '2027-04-30'; ExtendedEnd = '2032-04-30'; Live = 'ubuntu:22.04'; Note = '' }
+        @{ Match = 'Ubuntu\D*24\.04';                        Label = 'Ubuntu 24.04 LTS';             EndOfSupport = '2029-04-30'; ExtendedEnd = '2034-04-30'; Live = 'ubuntu:24.04'; Note = '' }
         @{ Match = '(SUSE Linux Enterprise|SLES)\D*\b(9|10|11)\b'; Label = 'SLES 11 or older';       EndOfSupport = '2022-03-31'; ExtendedEnd = '';           Note = '' }
         @{ Match = '(SUSE Linux Enterprise|SLES)\D*\b12\b';  Label = 'SLES 12';                      EndOfSupport = '2024-10-31'; ExtendedEnd = '2027-10-31'; Live = 'sles:12.5'; Note = 'LTSS required' }
         @{ Match = '(SUSE Linux Enterprise|SLES)\D*\b15\b';  Label = 'SLES 15';                      EndOfSupport = '2031-07-31'; ExtendedEnd = '';           Note = '' }
@@ -197,14 +198,16 @@
     #     client picks the exact version from a dropdown and the dates, OS status, strategy, target and readiness update live.
     #     The options and their dates come from the lifecycle data (Product = endoflife.date product; CyclePattern selects
     #     its releases), so new versions appear automatically. OsTemplate = the OS text the rules are evaluated with for an
-    #     option ({0} = the version, e.g. '2012 R2', '2019'). First match wins: keep '2016 or later' above other Server rows.
+    #     option ({0} = the version, e.g. '2012 R2', '2019'; {1} = the VM's bitness text '(64-bit)' / '(32-bit)', kept from RVTools).
+    #     HideEndedBefore = options whose support AND paid extended support both ended before this date are not offered
+    #     ('today-36m' = 3 years before the run; '' = show every release). First match wins: keep '2016 or later' above other Server rows.
     #---------------------------------------------------------------------------------------------
     # [R03/R06/R09] Families the client can refine to an exact version (first match wins).
     VersionChoices = @(
-        @{ Match = 'Windows Server\D*2016 or later'; Family = 'Windows Server 2016 or later'; Product = 'windows-server'; CyclePattern = '^20(1[6-9]|[2-9]\d)$'; OsTemplate = 'Microsoft Windows Server {0} (64-bit)'; Help = 'Inside the VM run winver, or in PowerShell: (Get-ComputerInfo).OsName - it shows e.g. "Windows Server 2019 Standard"' }
-        @{ Match = 'Windows Server\D*2012';          Family = 'Windows Server 2012 / 2012 R2'; Product = 'windows-server'; CyclePattern = '^2012(-r2)?$';         OsTemplate = 'Microsoft Windows Server {0} (64-bit)'; Help = 'Inside the VM run winver, or in PowerShell: (Get-ComputerInfo).OsName - it shows "Windows Server 2012" or "Windows Server 2012 R2"' }
-        @{ Match = 'Windows 10\b';                   Family = 'Windows 10';                    Product = 'windows';        CyclePattern = '^10-';                 OsTemplate = 'Microsoft Windows 10 (64-bit)';         Help = 'Inside the VM press Win+R and run winver: it shows the version (e.g. "Version 22H2") and the edition (Pro, Enterprise, LTSC ...)' }
-        @{ Match = 'Windows 11\b';                   Family = 'Windows 11';                    Product = 'windows';        CyclePattern = '^11-';                 OsTemplate = 'Microsoft Windows 11 (64-bit)';         Help = 'Inside the VM press Win+R and run winver: it shows the version (e.g. "Version 24H2") and the edition (Pro, Enterprise, LTSC ...)' }
+        @{ Match = 'Windows Server\D*2016 or later'; Family = 'Windows Server 2016 or later'; Product = 'windows-server'; CyclePattern = '^20(1[6-9]|[2-9]\d)$'; HideEndedBefore = ''; OsTemplate = 'Microsoft Windows Server {0} {1}'; Help = 'Inside the VM run winver, or in PowerShell: (Get-ComputerInfo).OsName - it shows e.g. "Windows Server 2019 Standard"' }
+        @{ Match = 'Windows Server\D*2012';          Family = 'Windows Server 2012 / 2012 R2'; Product = 'windows-server'; CyclePattern = '^2012(-r2)?$';         HideEndedBefore = '';          OsTemplate = 'Microsoft Windows Server {0} {1}'; Help = 'Inside the VM run winver, or in PowerShell: (Get-ComputerInfo).OsName - it shows "Windows Server 2012" or "Windows Server 2012 R2"' }
+        @{ Match = 'Windows 10\b';                   Family = 'Windows 10';                    Product = 'windows';        CyclePattern = '^10-';                 HideEndedBefore = 'today-36m'; OsTemplate = 'Microsoft Windows 10 {1}'; Help = 'Inside the VM press Win+R and run winver: it shows the version (e.g. "Version 22H2") and the edition (Pro, Enterprise, LTSC ...)' }
+        @{ Match = 'Windows 11\b';                   Family = 'Windows 11';                    Product = 'windows';        CyclePattern = '^11-';                 HideEndedBefore = 'today-36m'; OsTemplate = 'Microsoft Windows 11 {1}'; Help = 'Inside the VM press Win+R and run winver: it shows the version (e.g. "Version 24H2") and the edition (Pro, Enterprise, LTSC ...)' }
     )
 
     #---------------------------------------------------------------------------------------------

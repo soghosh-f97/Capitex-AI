@@ -73,12 +73,17 @@ Check 'cache: rhel from fresh cache' ($cat.Source['rhel'] -eq 'Cache') $cat.Sour
 $changes = @(Update-OsLifecycleFromCatalog -Settings $s -Catalog $cat)
 $rhel6 = $s.OsLifecycle | Where-Object { $_.Label -eq 'RHEL 6' }
 Check 'cache: RHEL 6 extended end updated' ($rhel6.ExtendedEnd -eq '2029-06-30') $rhel6.ExtendedEnd
-Check 'cache: RHEL 6 note rewritten' ($rhel6.Note -eq 'ELS ends Jun 2029') $rhel6.Note
+Check 'cache: RHEL 6 note rewritten' ($rhel6.Note -eq 'ELS ends Jun 2029 (verify: Red Hat may offer a longer ELS)') $rhel6.Note
 Check 'cache: change reported' (@($changes | Where-Object { $_.Label -eq 'RHEL 6' -and $_.Field -eq 'ExtendedEnd' }).Count -eq 1)
 Check 'cache: RHEL 8 missing in cache -> kept + reported' (@($changes | Where-Object { $_.Label -eq 'RHEL 8' -and $_.Field -eq 'Live' }).Count -eq 1)
 (Get-Item (Join-Path $tmp 'eol_rhel.json')).LastWriteTime = (Get-Date).AddDays(-30)
 $cat = Get-LifecycleCatalog -Settings (New-Settings) -Offline -CacheDir $tmp
-Check 'cache: 30-day-old cache -> StaleCache' ($cat.Source['rhel'] -eq 'StaleCache') $cat.Source['rhel']
+Check 'cache: 30-day-old cache older than the shipped snapshot -> Snapshot' ($cat.Source['rhel'] -eq 'Snapshot') $cat.Source['rhel']
+Check 'cache: reason names the newer snapshot' ($cat.Reason['rhel'] -like '*replaced by the newer shipped snapshot*') $cat.Reason['rhel']
+$oldSnap = Join-Path $tmp 'old_snapshot.json'
+[System.IO.File]::WriteAllText($oldSnap, ((Get-Content -LiteralPath (Join-Path (Join-Path $root 'Config') 'LifecycleSnapshot.json') -Raw) -replace '"generated_at": "[^"]+"', '"generated_at": "2025-01-01"'))
+$cat = Get-LifecycleCatalog -Settings (New-Settings) -Offline -CacheDir $tmp -SnapshotPath $oldSnap
+Check 'cache: 30-day-old cache newer than the snapshot -> StaleCache' ($cat.Source['rhel'] -eq 'StaleCache') $cat.Source['rhel']
 Check 'cache: stale warning message' (@($cat.Messages | Where-Object { $_ -like 'rhel: using cached dates*' }).Count -eq 1)
 Remove-Item (Join-Path $tmp 'eol_rhel.json')
 $sd = New-Settings; $deb = $sd.OsLifecycle | Where-Object { $_.Label -eq 'Debian 12' }
@@ -94,7 +99,7 @@ $threw = $false
 try { $cat = Get-LifecycleCatalog -Settings $s -CacheDir $tmp } catch { $threw = $true; Write-Host $_ }
 Check 'online-fail: no exception' (-not $threw)
 Check 'online-fail: windows from snapshot' ($cat.Source['windows'] -eq 'Snapshot')
-Check 'online-fail: failure messages recorded' (@($cat.Messages | Where-Object { $_ -like 'Could not read*' }).Count -ge 2)
+Check 'online-fail: failure recorded once, host then skipped' (@($cat.Messages | Where-Object { $_ -like 'Could not read*' }).Count -eq 1 -and @($cat.Messages | Where-Object { $_ -like '*is not reachable*' }).Count -eq 1) (($cat.Messages) -join ' | ')
 $vm = Test-VmImportDocChanged -Settings $s
 Check 'vm-import: unreachable -> NotChecked' ($vm.Status -eq 'NotChecked') $vm.Status
 $vm = Test-VmImportDocChanged -Settings $s -Offline
@@ -160,6 +165,111 @@ $rows = @(New-DataSourceRows -LifecycleCatalog $cat -LifecycleChanges $ch -VmImp
 Check 'datasources: rows built' ($rows.Count -ge 12) "got $($rows.Count)"
 Check 'datasources: shape' (@($rows | Where-Object { -not ($_.PSObject.Properties['Area'] -and $_.PSObject.Properties['Source'] -and $_.PSObject.Properties['Status'] -and $_.PSObject.Properties['RetrievedAt'] -and $_.PSObject.Properties['Detail']) }).Count -eq 0)
 Check 'datasources: snapshot labelled' (@($rows | Where-Object { $_.Status -eq 'Offline snapshot (verify)' }).Count -eq 9)
+
+Write-Host "10. Live key alternatives (endoflife.date naming may vary) and Data_Sources wording"
+$s = New-Settings
+$w10 = $s.OsLifecycle | Where-Object { $_.Label -eq 'Windows 10' }
+Check 'settings: Windows 10 has LiveAlt' ([string]$w10.LiveAlt -like '*10-22h2-e*') ([string]$w10.LiveAlt)
+Check 'settings: Windows Server 2008 has no Live key' (-not ($s.OsLifecycle | Where-Object { $_.Label -like 'Windows Server 2008*' }).ContainsKey('Live'))
+$alts = @(Get-LiveKeyAlternatives 'windows:10-22h2|windows:10-22h2-e|10-22h2-w')
+Check 'alternatives: three parsed, product carried over' ($alts.Count -eq 3 -and $alts[2].Product -eq 'windows' -and $alts[2].Cycle -eq '10-22h2-w')
+Check 'alternatives: garbage skipped' (@(Get-LiveKeyAlternatives '|:x|nocolon').Count -eq 0)
+$win = '{"result":{"name":"windows","releases":[{"name":"10-22h2-e","eolFrom":"2025-10-14","eoesFrom":"2028-10-10"},{"name":"11-24h2-e","eolFrom":"2027-10-12"},{"name":"11-24h2-w","eolFrom":"2026-10-13"}]}}'
+[System.IO.File]::WriteAllText((Join-Path $tmp 'eol_windows.json'), $win)
+$cat = Get-LifecycleCatalog -Settings $s -Offline -CacheDir $tmp
+$ch = @(Update-OsLifecycleFromCatalog -Settings $s -Catalog $cat)
+Check 'alternatives: Windows 10 dates from 10-22h2-e' ($w10.LiveFound -and $w10.LiveRelease -eq '10-22h2-e' -and $w10.DateSource -like 'endoflife.date (cache*') "$($w10.LiveRelease) / $($w10.DateSource)"
+$rows = @(New-DataSourceRows -LifecycleCatalog $cat -LifecycleChanges $ch -Settings $s)
+$wrow = $rows | Where-Object { $_.Area -eq 'OS support dates - windows' }
+Check 'datasources: one row per product' (@($rows | Where-Object { $_.Area -like 'OS support dates - *' -and $_.Area -notin @('OS support dates - updated', 'OS support dates - note', 'OS support dates - settings file') }).Count -eq 9)
+Check 'datasources: windows row says which rows took dates' ($wrow.Detail -like '*taken from this source for: *Windows 10*') $wrow.Detail
+Check 'datasources: windows row says which rows kept settings dates' ($wrow.Detail -like '*settings-file dates kept for: *Windows 7*' -and $wrow.Detail -notlike '*kept for: *Windows 10*') $wrow.Detail
+Check 'datasources: no per-URL note rows' (@($rows | Where-Object { $_.Area -eq 'OS support dates - note' -and $_.Detail -like 'Could not read*' }).Count -eq 0)
+Remove-Item (Join-Path $tmp 'eol_windows.json')
+# stale windows cache without any 10-/11- release while the (older) snapshot has them -> snapshot
+[System.IO.File]::WriteAllText((Join-Path $tmp 'eol_windows.json'), '{"result":{"releases":[{"name":"7-sp1","eolFrom":"2020-01-14"}]}}')
+(Get-Item (Join-Path $tmp 'eol_windows.json')).LastWriteTime = (Get-Date).AddDays(-40)
+$cat = Get-LifecycleCatalog -Settings (New-Settings) -Offline -CacheDir $tmp -SnapshotPath $oldSnap
+Check 'stale cache missing chooser releases -> snapshot' ($cat.Source['windows'] -eq 'Snapshot' -and $cat.Reason['windows'] -like '*no release for a version-choice family*') "$($cat.Source['windows']) / $($cat.Reason['windows'])"
+Remove-Item (Join-Path $tmp 'eol_windows.json')
+
+Write-Host "11. Host unreachable: one try per host, legacy API only after 404 / bad format (mocked Invoke-WebRequest)"
+$script:iwr = New-Object System.Collections.Generic.List[string]
+$script:mode = 'transport'
+function Invoke-WebRequest {
+    param([string]$Uri, [switch]$UseBasicParsing, [int]$TimeoutSec, $ErrorAction)
+    $script:iwr.Add($Uri)
+    switch ($script:mode) {
+        'transport' { throw (New-Object System.Net.WebException('The proxy tunnel request to proxy failed with status code 403.')) }
+        'http404'   {
+            if ($Uri -like '*/v1/*') { $ex = New-Object System.Exception('Response status code does not indicate success: 404 (Not Found).'); $ex | Add-Member -NotePropertyName Response -NotePropertyValue ([pscustomobject]@{ StatusCode = 404 }); throw $ex }
+            return [pscustomobject]@{ Content = '[{"cycle":"2016","eol":"2027-01-12"},{"cycle":"2019","eol":"2029-01-09"}]' }
+        }
+        'http500'   { $ex = New-Object System.Exception('500'); $ex | Add-Member -NotePropertyName Response -NotePropertyValue ([pscustomobject]@{ StatusCode = 500 }); throw $ex }
+        'html'      { if ($Uri -like '*/v1/*') { return [pscustomobject]@{ Content = '<html>maintenance</html>' } }; return [pscustomobject]@{ Content = '[{"cycle":"2019","eol":"2029-01-09"}]' } }
+    }
+}
+$sOn = New-Settings
+$sOn.LiveData = @{ Enabled = $true; CacheDays = 7; LifecycleApiBase = 'https://eol.test/api/v1/products'; LifecycleLegacyBase = 'https://eol.test/api'; TimeoutSec = 5; VmImportDocUrl = ''; VmImportDocKnownHash = '' }
+$liveTmp = Join-Path $tmp 'live'; New-Item -ItemType Directory -Path $liveTmp | Out-Null
+$cat = Get-LifecycleCatalog -Settings $sOn -CacheDir $liveTmp 6>$null
+Check 'unreachable: only ONE request for 9 products' ($script:iwr.Count -eq 1) ("requests: " + $script:iwr.Count)
+Check 'unreachable: every product from the snapshot' (@($cat.Source.Values | Where-Object { $_ -ne 'Snapshot' }).Count -eq 0)
+Check 'unreachable: short reason per product' ($cat.Reason['rhel'] -like 'eol.test not reachable*') $cat.Reason['rhel']
+$script:iwr.Clear(); $script:mode = 'http404'
+$cat = Get-LifecycleCatalog -Settings $sOn -CacheDir $liveTmp 6>$null
+Check 'http 404: legacy API tried and used' ($cat.Source['windows-server'] -eq 'Live' -and $script:iwr.Count -eq 18) ("source=" + $cat.Source['windows-server'] + " requests=" + $script:iwr.Count)
+Get-ChildItem $liveTmp | Remove-Item
+$script:iwr.Clear(); $script:mode = 'http500'
+$cat = Get-LifecycleCatalog -Settings $sOn -CacheDir $liveTmp 6>$null
+Check 'http 500: legacy API NOT tried, snapshot used' ($script:iwr.Count -eq 9 -and $cat.Source['rhel'] -eq 'Snapshot' -and $cat.Reason['rhel'] -like 'HTTP 500*') ("requests=" + $script:iwr.Count + " " + $cat.Reason['rhel'])
+$script:iwr.Clear(); $script:mode = 'html'
+$cat = Get-LifecycleCatalog -Settings $sOn -CacheDir $liveTmp 6>$null
+Check 'bad format: legacy API tried' ($script:iwr.Count -eq 18 -and $cat.Source['windows-server'] -eq 'Live') ("requests=" + $script:iwr.Count)
+Remove-Item -Path Function:\Invoke-WebRequest
+Get-ChildItem $liveTmp | Remove-Item
+
+Write-Host "12. Dates cannot shift with time zones; relative dates; VM Import page footer"
+$j = ConvertFrom-LiveJsonText '{"a":"2029-01-09T23:30:00-05:00","b":"2029-01-09T00:30:00+09:00","c":"2029-01-09"}'
+Check 'tz: offset timestamp keeps its date' ((ConvertTo-LiveDate $j.a) -eq '2029-01-09' -and (ConvertTo-LiveDate $j.b) -eq '2029-01-09' -and (ConvertTo-LiveDate $j.c) -eq '2029-01-09') "$($j.a) / $($j.b)"
+Check 'relative: today-36m' ((Resolve-SupportCutoffDate -Value 'today-36m' -AsOf $asOf) -eq '2023-11-04')
+Check 'relative: today - 1y' ((Resolve-SupportCutoffDate -Value 'today - 1y' -AsOf $asOf) -eq '2025-11-04')
+$page1 = '<html><nav>menu</nav><div id="main-col-body"><h1>Prereqs</h1><p>Up to 16 TiB</p></div><div id="main-col-footer">Did this page help you? (c) 2025 Amazon</div></html>'
+$page2 = '<html><nav>other menu</nav><div id="main-col-body"><h1>Prereqs</h1><p>Up to 16 TiB</p></div><div id="main-col-footer">Did this page help you? (c) 2026 Amazon</div></html>'
+$t1 = Get-VmImportDocText -Html $page1
+Check 'vm-import: footer not in the text' ($t1 -eq 'Prereqs Up to 16 TiB') $t1
+Check 'vm-import: footer change keeps the same text' ($t1 -eq (Get-VmImportDocText -Html $page2))
+Check 'vm-import: "Document Conventions" cut' ((Get-VmImportDocText -Html '<main><p>Rules</p><h2>Document Conventions</h2><p>x</p></main>') -eq 'Rules')
+
+Write-Host "13. Windows AMI names (SSM /aws/service/ami-windows-latest)"
+$onlyR2 = @('/aws/service/ami-windows-latest/Windows_Server-2012-R2_RTM-English-64Bit-Base', '/aws/service/ami-windows-latest/Windows_Server-2016-English-Full-Base', '/aws/service/ami-windows-latest/EC2LaunchV2-Windows_Server-2022-English-Full-Base')
+$onlyRtm = @('/aws/service/ami-windows-latest/Windows_Server-2012-RTM-English-64Bit-Base')
+Check 'ami: 2012 R2 found' (Test-WindowsAmiOffered -AmiNames $onlyR2 -Version '2012 R2')
+Check 'ami: 2012 does NOT match R2 names' (-not (Test-WindowsAmiOffered -AmiNames $onlyR2 -Version '2012'))
+Check 'ami: 2012 RTM found' (Test-WindowsAmiOffered -AmiNames $onlyRtm -Version '2012')
+Check 'ami: 2012 R2 does NOT match RTM names' (-not (Test-WindowsAmiOffered -AmiNames $onlyRtm -Version '2012 R2'))
+Check 'ami: 2016 / 2022 found, 2019 / 2025 not' ((Test-WindowsAmiOffered -AmiNames $onlyR2 -Version '2016') -and (Test-WindowsAmiOffered -AmiNames $onlyR2 -Version '2022') -and -not (Test-WindowsAmiOffered -AmiNames $onlyR2 -Version '2019') -and -not (Test-WindowsAmiOffered -AmiNames $onlyR2 -Version '2025'))
+$StrategySettings = New-Settings; $StrategyAsOf = [datetime]'2026-11-04'
+$AwsLiveFacts = [pscustomobject]@{ InstanceTypes = @{}; WindowsAmis = $onlyR2; Region = 'eu-central-1' }
+Check 'osmap ami: 2012 R2 VM -> offered' ((Get-OSMapping -OSString 'Microsoft Windows Server 2012 R2 (64-bit)').RecommendedAMI -like '*standard AMI offered*')
+Check 'osmap ami: 2012 VM -> not offered' ((Get-OSMapping -OSString 'Microsoft Windows Server 2012 (64-bit)').RecommendedAMI -like '*no standard AMI*')
+$ds = @(New-DataSourceRows -AwsFacts ([pscustomobject]@{ Enabled = $true; Region = 'eu-central-1'; InstanceTypes = @{}; RegionServices = @(); WindowsAmis = $onlyR2; Status = @{ InstanceTypes = 'x'; RegionServices = 'x'; WindowsAmis = 'Live' }; Messages = @() }))
+$amiRow = $ds | Where-Object { $_.Area -eq 'Windows Server AMIs' }
+Check 'datasources ami: 2012 NOT, 2012 R2 offered' ($amiRow.Detail -like '*2012: NOT offered*' -and $amiRow.Detail -like '*2012 R2: offered*') $amiRow.Detail
+$AwsLiveFacts = $null
+
+Write-Host "14. Snapshot and settings content (review findings)"
+$snap = Get-Content -LiteralPath (Join-Path (Join-Path $root 'Config') 'LifecycleSnapshot.json') -Raw | ConvertFrom-Json
+$wr = @($snap.products.windows.result.releases)
+Check 'snapshot: LTSB 2015 present' (@($wr | Where-Object { $_.name -eq '10-1507-e-lts' -and $_.eolFrom -eq '2025-10-14' }).Count -eq 1)
+Check 'snapshot: 22H2 note says consumer ESU ended' ([string](($wr | Where-Object { $_.name -eq '10-22h2' }).note) -like '*consumer ESU ended 13 Oct 2026*')
+$ur = @($snap.products.ubuntu.result.releases | Where-Object { $_.eoesFrom })
+Check 'snapshot: Ubuntu ESM ends in April' (@($ur | Where-Object { [string]$_.eoesFrom -notmatch '-04-30$' }).Count -eq 0)
+$s = New-Settings
+$vc = @($s.VersionChoices)
+Check 'settings: Windows 10/11 hide releases ended > 36 months ago' (@($vc | Where-Object { $_.Family -like 'Windows 1*' -and $_.HideEndedBefore -eq 'today-36m' }).Count -eq 2)
+Check 'settings: OsTemplate keeps bitness {1}' (@($vc | Where-Object { [string]$_.OsTemplate -notlike '*{1}*' }).Count -eq 0)
+Check 'settings: TimeoutSec 20' ([int]$s.LiveData.TimeoutSec -eq 20)
 
 Remove-Item -Recurse -Force $tmp
 Write-Host ("{0} passed, {1} failed" -f $script:pass, $script:fail) -ForegroundColor $(if ($script:fail) { 'Red' } else { 'Green' })

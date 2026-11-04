@@ -51,11 +51,18 @@ function Get-OSMappingAmiNote {
     $facts = Get-Variable -Name AwsLiveFacts -ValueOnly -ErrorAction SilentlyContinue
     if ($null -eq $facts -or @($facts.WindowsAmis).Count -eq 0) { return '' }
     $ver = $null
-    if ($OSString -match 'Windows Server\D*2012 R2') { $ver = '2012_R2' }
-    elseif ($OSString -match 'Windows Server\D*(2016 or later)') { return '' }
+    if ($OSString -match 'Windows Server\D*(2016 or later)') { return '' }
+    elseif ($OSString -match 'Windows Server\D*(2008|2012)\s*R2') { $ver = $Matches[1] + ' R2' }
     elseif ($OSString -match 'Windows Server\D*(2008|2012|2016|2019|2022|2025)') { $ver = $Matches[1] }
     if (-not $ver) { return '' }
-    $offered = @($facts.WindowsAmis | Where-Object { $_ -match ('Windows_Server-' + $ver + '-') }).Count -gt 0
+    if (Get-Command Test-WindowsAmiOffered -ErrorAction SilentlyContinue) {
+        $offered = Test-WindowsAmiOffered -AmiNames @($facts.WindowsAmis) -Version $ver
+    }
+    else {
+        # fallback without LiveDataProviders.ps1: AWS names 2012 R2 'Windows_Server-2012-R2_...' and 2012 'Windows_Server-2012-RTM-...'
+        $pat = switch ($ver) { '2012 R2' { 'Windows_Server-2012-R2_' } '2012' { 'Windows_Server-2012-RTM-' } '2008 R2' { 'Windows_Server-2008-R2_' } '2008' { 'Windows_Server-2008-SP2-' } default { "Windows_Server-$ver-" } }
+        $offered = @($facts.WindowsAmis | Where-Object { [string]$_ -match [regex]::Escape($pat) }).Count -gt 0
+    }
     if ($offered) { return (' [standard AMI offered in {0}]' -f $facts.Region) }
     return (' [no standard AMI in {0}: custom AMI via VM Import]' -f $facts.Region)
 }

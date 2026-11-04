@@ -30,7 +30,7 @@ function Get-LiveDataSetting {
         LifecycleLegacyBase  = 'https://endoflife.date/api'
         VmImportDocUrl       = 'https://docs.aws.amazon.com/vm-import/latest/userguide/prerequisites.html'
         VmImportDocKnownHash = ''
-        TimeoutSec           = 30
+        TimeoutSec           = 20
     }
     if ($Settings -and $Settings.ContainsKey('LiveData') -and $Settings.LiveData -is [hashtable] -and $Settings.LiveData.ContainsKey($Name)) {
         return $Settings.LiveData[$Name]
@@ -38,13 +38,37 @@ function Get-LiveDataSetting {
     return $defaults[$Name]
 }
 
-function Invoke-LiveHttpGet {
-    # GET a URL and return its text, or $null on any failure (the reason is added to $Messages).
+function Get-LiveHttpStatusCode {
+    # HTTP status code carried by a web exception (PowerShell 7 HttpResponseException / 5.1 WebException), or 0
+    # when the target never answered (timeout, DNS, connection refused, proxy refusing the tunnel).
+    param($Exception)
+    $e = $Exception
+    while ($null -ne $e) {
+        $resp = $null
+        $p = $e.PSObject.Properties['Response']
+        if ($null -ne $p) { try { $resp = $p.Value } catch { $resp = $null } }
+        if ($null -ne $resp) {
+            $sc = $resp.PSObject.Properties['StatusCode']
+            if ($null -ne $sc) { try { $code = [int]$sc.Value; if ($code -gt 0) { return $code } } catch { } }
+        }
+        $e = $e.InnerException
+    }
+    return 0
+}
+
+function Invoke-LiveHttpRequest {
+    <#
+        GET a URL. Returns [pscustomobject]@{ Text; StatusCode; TransportFailure; Error }:
+          Text             = body ($null on failure)
+          StatusCode       = HTTP status of a failed request (0 = the target never answered)
+          TransportFailure = $true when no HTTP response came back (timeout / DNS / refused / proxy tunnel refused):
+                             the caller then treats the whole host as unreachable for this run
+    #>
     param(
         [Parameter(Mandatory)] [string]$Url,
-        [int]$TimeoutSec = 30,
-        [System.Collections.Generic.List[string]]$Messages
+        [int]$TimeoutSec = 20
     )
+    $res = [pscustomobject]@{ Text = $null; StatusCode = 0; TransportFailure = $false; Error = '' }
     try {
         # TLS 1.2 for Windows PowerShell 5.1 (PowerShell 7 negotiates it by default)
         if ($PSVersionTable.PSVersion.Major -lt 6) {
@@ -53,12 +77,41 @@ function Invoke-LiveHttpGet {
         $resp = Invoke-WebRequest -Uri $Url -UseBasicParsing -TimeoutSec $TimeoutSec -ErrorAction Stop
         $content = $resp.Content
         if ($content -is [byte[]]) { $content = [System.Text.Encoding]::UTF8.GetString($content) }
-        return [string]$content
+        $res.Text = [string]$content
     }
     catch {
-        if ($null -ne $Messages) { $Messages.Add(("Could not read {0}: {1}" -f $Url, $_.Exception.Message)) }
-        return $null
+        $res.Error = [string]$_.Exception.Message
+        $res.StatusCode = Get-LiveHttpStatusCode $_.Exception
+        $res.TransportFailure = ($res.StatusCode -eq 0)
     }
+    return $res
+}
+
+function Invoke-LiveHttpGet {
+    # GET a URL and return its text, or $null on any failure (the reason is added to $Messages).
+    param(
+        [Parameter(Mandatory)] [string]$Url,
+        [int]$TimeoutSec = 20,
+        [System.Collections.Generic.List[string]]$Messages
+    )
+    $r = Invoke-LiveHttpRequest -Url $Url -TimeoutSec $TimeoutSec
+    if ($null -eq $r.Text -and $null -ne $Messages) { $Messages.Add(("Could not read {0}: {1}" -f $Url, $r.Error)) }
+    return $r.Text
+}
+
+function ConvertFrom-LiveJsonText {
+    <#
+        ConvertFrom-Json for endoflife.date / cache / snapshot text. Timestamps are cut to their date part in the RAW
+        text first ("2029-01-09T23:30:00-05:00" -> "2029-01-09"), because PowerShell 7 turns ISO timestamps into
+        local DateTime values and a time-zone offset could otherwise move the date by a day.
+    #>
+    param([string]$Text)
+    if ([string]::IsNullOrWhiteSpace($Text)) { return $null }
+    $t = [regex]::Replace($Text, '"(\d{4}-\d{2}-\d{2})T[0-9:.]*(Z|[+-]\d{2}:?\d{2})?"', '"$1"')
+    $obj = $t | ConvertFrom-Json
+    # PowerShell 7 unrolls a one-element JSON array into a single object: keep a JSON array an array (legacy API shape)
+    if ($t.TrimStart().StartsWith('[')) { return , @($obj) }
+    return $obj
 }
 
 function ConvertTo-LiveDate {
@@ -192,6 +245,7 @@ function ConvertFrom-LifecycleJson {
                 EndOfSupport  = ConvertTo-LiveDate (Get-LiveProperty $r 'eol')
                 ExtendedEnd   = ConvertTo-LiveDate (Get-LiveProperty $r 'extendedSupport')
                 IsLts         = ConvertTo-LiveBool (Get-LiveProperty $r 'lts')
+                Note          = ''
                 Source        = $Source
             }
         }
@@ -209,10 +263,47 @@ function ConvertFrom-LifecycleJson {
                 EndOfSupport  = ConvertTo-LiveDate (Get-LiveProperty $r 'eolFrom')
                 ExtendedEnd   = ConvertTo-LiveDate (Get-LiveProperty $r 'eoesFrom')
                 IsLts         = ConvertTo-LiveBool (Get-LiveProperty $r 'isLts')
+                Note          = [string](Get-LiveProperty $r 'note')   # optional, snapshot only (e.g. commercial vs consumer ESU)
                 Source        = $Source
             }
         }
         if (-not [string]::IsNullOrWhiteSpace($rel.Cycle)) { $out.Add($rel) }
+    }
+    return $out.ToArray()
+}
+
+function Get-RowLiveKey {
+    # Live key of an OsLifecycle row plus its optional LiveAlt alternatives ('product:cycle|product:cycle'), as one string.
+    param($Row)
+    if (-not ($Row -is [hashtable])) { return '' }
+    $k = if ($Row.ContainsKey('Live')) { [string]$Row.Live } else { '' }
+    if ($Row.ContainsKey('LiveAlt') -and -not [string]::IsNullOrWhiteSpace([string]$Row.LiveAlt)) {
+        $k = if ([string]::IsNullOrWhiteSpace($k)) { [string]$Row.LiveAlt } else { $k + '|' + [string]$Row.LiveAlt }
+    }
+    return $k.Trim()
+}
+
+function Get-LiveKeyAlternatives {
+    <#
+        Parses an OsLifecycle Live key into its alternatives, first = preferred:
+          'rhel:7'                                            -> rhel/7
+          'windows:10-22h2|windows:10-22h2-e|windows:10-22h2-w' -> three alternatives (first one found wins)
+          'windows:10-22h2|10-22h2-e'                          -> an alternative without a product reuses the previous product
+        Returns @( [pscustomobject]@{ Product; Cycle } ); invalid parts are skipped.
+    #>
+    param([string]$Live)
+    $out = New-Object System.Collections.Generic.List[object]
+    $lastProduct = ''
+    foreach ($part in ([string]$Live).Split('|')) {
+        $t = $part.Trim()
+        if (-not $t) { continue }
+        $i = $t.IndexOf(':')
+        if ($i -gt 0) { $product = $t.Substring(0, $i).Trim().ToLowerInvariant(); $cycle = $t.Substring($i + 1).Trim() }
+        elseif ($lastProduct) { $product = $lastProduct; $cycle = $t }
+        else { continue }
+        if (-not $product -or -not $cycle) { continue }
+        $lastProduct = $product
+        $out.Add([pscustomobject]@{ Product = $product; Cycle = $cycle })
     }
     return $out.ToArray()
 }
@@ -222,9 +313,11 @@ function Get-LifecycleProductNames {
     param([Parameter(Mandatory)] [hashtable]$Settings)
     $names = New-Object System.Collections.Generic.List[string]
     foreach ($row in @($Settings.OsLifecycle)) {
-        if ($row -is [hashtable] -and $row.ContainsKey('Live') -and -not [string]::IsNullOrWhiteSpace([string]$row.Live)) {
-            $p = ([string]$row.Live).Split(':')[0].Trim().ToLowerInvariant()
-            if ($p -and -not $names.Contains($p)) { $names.Add($p) }
+        $key = Get-RowLiveKey $row
+        if ($key) {
+            foreach ($alt in (Get-LiveKeyAlternatives $key)) {
+                if (-not $names.Contains($alt.Product)) { $names.Add($alt.Product) }
+            }
         }
     }
     if ($Settings.ContainsKey('VersionChoices')) {
@@ -251,12 +344,15 @@ function Get-LifecycleCatalog {
         [string]$CacheDir,
         [string]$SnapshotPath
     )
-    $messages = New-Object System.Collections.Generic.List[string]
+    $messages = New-Object System.Collections.Generic.List[string]   # full detail (console)
+    $notes    = New-Object System.Collections.Generic.List[string]   # short general notes (sheet Data_Sources)
     $catalog = [pscustomobject]@{
         Products    = @{}
-        Source      = @{}
+        Source      = @{}      # '<product>' = Live | Cache | StaleCache | Snapshot | None
         RetrievedAt = @{}
+        Reason      = @{}      # '<product>' = short reason why the live API was not used ('' when live)
         Messages    = $messages
+        Notes       = $notes
     }
     if ([string]::IsNullOrWhiteSpace($CacheDir)) { $CacheDir = Get-LiveCacheRoot }
     if (-not (Test-Path -LiteralPath $CacheDir)) { New-Item -ItemType Directory -Path $CacheDir -Force | Out-Null }
@@ -270,67 +366,130 @@ function Get-LifecycleCatalog {
     $enabled   = [bool](Get-LiveDataSetting $Settings 'Enabled')
     $cacheDays = [double](Get-LiveDataSetting $Settings 'CacheDays')
     $timeout   = [int](Get-LiveDataSetting $Settings 'TimeoutSec')
+    if ($timeout -le 0) { $timeout = 20 }
     $v1Base    = ([string](Get-LiveDataSetting $Settings 'LifecycleApiBase')).TrimEnd('/')
     $oldBase   = ([string](Get-LiveDataSetting $Settings 'LifecycleLegacyBase')).TrimEnd('/')
     $online    = $enabled -and -not $Offline
-    if (-not $enabled) { $messages.Add('LiveData.Enabled = $false: the internet is not used for OS support dates.') }
-    elseif ($Offline)  { $messages.Add('-Offline: the internet is not used for OS support dates.') }
+    $offlineReason = ''
+    if (-not $enabled) { $offlineReason = 'LiveData.Enabled = $false'; $messages.Add('LiveData.Enabled = $false: the internet is not used for OS support dates.'); $notes.Add('LiveData.Enabled = $false: the internet was not used for OS support dates.') }
+    elseif ($Offline)  { $offlineReason = 'run with -Offline'; $messages.Add('-Offline: the internet is not used for OS support dates.'); $notes.Add('Run with -Offline: the internet was not used for OS support dates.') }
 
     # Snapshot (read once)
     $snapshot = $null
     if (Test-Path -LiteralPath $SnapshotPath) {
-        try { $snapshot = Get-Content -LiteralPath $SnapshotPath -Raw -Encoding UTF8 | ConvertFrom-Json }
-        catch { $messages.Add(("Snapshot file {0} could not be read: {1}" -f $SnapshotPath, $_.Exception.Message)) }
+        try { $snapshot = ConvertFrom-LiveJsonText (Get-Content -LiteralPath $SnapshotPath -Raw -Encoding UTF8) }
+        catch { $messages.Add(("Snapshot file {0} could not be read: {1}" -f $SnapshotPath, $_.Exception.Message)); $notes.Add('The shipped snapshot Config\LifecycleSnapshot.json could not be read.') }
     }
-    else { $messages.Add(("Snapshot file not found: {0}" -f $SnapshotPath)) }
+    else { $messages.Add(("Snapshot file not found: {0}" -f $SnapshotPath)); $notes.Add('The shipped snapshot Config\LifecycleSnapshot.json is missing.') }
     $snapshotDate = [string](Get-LiveProperty $snapshot 'generated_at')
     $snapshotProducts = Get-LiveProperty $snapshot 'products'
+    $snapDay = $null
+    if ($snapshotDate -match '^(\d{4}-\d{2}-\d{2})') {
+        $tmp = [datetime]::MinValue
+        if ([datetime]::TryParseExact($Matches[1], 'yyyy-MM-dd', [System.Globalization.CultureInfo]::InvariantCulture, [System.Globalization.DateTimeStyles]::None, [ref]$tmp)) { $snapDay = $tmp.Date }
+    }
+
+    $shortErr = { param($t) $x = (([string]$t) -split "`n")[0].Trim(); if ($x.Length -gt 120) { $x = $x.Substring(0, 117) + '...' }; $x }
+    $hostOf = { param($u) try { ([uri]$u).Host } catch { [string]$u } }
+    $unreachable = @{}   # host -> short reason: after the first transport failure the host is not tried again in this run
 
     foreach ($product in (Get-LifecycleProductNames -Settings $Settings)) {
         $cacheFile = Join-Path $CacheDir ("eol_{0}.json" -f $product)
         $releases = @(); $source = ''; $when = ''
+        $why = New-Object System.Collections.Generic.List[string]
+        if (-not $online) { $why.Add($offlineReason) }
 
-        # 1. Live
+        # 1. Live: v1 API; the legacy API only after an HTTP 404 or an unexpected response (never after a timeout)
         if ($online) {
-            foreach ($url in @(("{0}/{1}" -f $v1Base, $product), ("{0}/{1}.json" -f $oldBase, $product))) {
-                $text = Invoke-LiveHttpGet -Url $url -TimeoutSec $timeout -Messages $messages
-                if ($null -eq $text) { continue }
-                try {
-                    $json = $text | ConvertFrom-Json
-                    $releases = @(ConvertFrom-LifecycleJson -Product $product -Json $json -Source 'endoflife.date (live)')
+            $tryLegacy = $false
+            $liveFail = ''
+            foreach ($attempt in @(@{ Kind = 'v1'; Url = ("{0}/{1}" -f $v1Base, $product) }, @{ Kind = 'legacy'; Url = ("{0}/{1}.json" -f $oldBase, $product) })) {
+                if ($attempt.Kind -eq 'legacy' -and -not $tryLegacy) { break }
+                $url = $attempt.Url
+                $h = & $hostOf $url
+                if ($unreachable.ContainsKey($h)) { $liveFail = ('{0} not reachable ({1})' -f $h, $unreachable[$h]); break }
+                Write-Host ("  Contacting {0} for {1} ..." -f $h, $product) -ForegroundColor DarkGray
+                $r = Invoke-LiveHttpRequest -Url $url -TimeoutSec $timeout
+                if ($null -eq $r.Text) {
+                    $messages.Add(("Could not read {0}: {1}" -f $url, $r.Error))
+                    if ($r.TransportFailure) {
+                        $unreachable[$h] = (& $shortErr $r.Error)
+                        $messages.Add(("{0} is not reachable - no further live calls to it in this run" -f $h))
+                        $liveFail = ('{0} not reachable ({1})' -f $h, $unreachable[$h])
+                        break
+                    }
+                    $liveFail = ('HTTP {0} from {1}' -f $r.StatusCode, $h)
+                    $tryLegacy = ($r.StatusCode -eq 404)
+                    continue
                 }
-                catch { $messages.Add(("{0}: response is not valid JSON ({1})" -f $url, $_.Exception.Message)); $releases = @() }
-                if ($releases.Count -gt 0) {
-                    try { [System.IO.File]::WriteAllText($cacheFile, $text, (New-Object System.Text.UTF8Encoding($false))) } catch { $messages.Add(("Cache write failed for {0}: {1}" -f $product, $_.Exception.Message)) }
-                    $source = 'Live'; $when = (Get-Date).ToString('yyyy-MM-dd HH:mm')
+                $rels = @()
+                try { $rels = @(ConvertFrom-LifecycleJson -Product $product -Json (ConvertFrom-LiveJsonText $r.Text) -Source 'endoflife.date (live)') }
+                catch { $messages.Add(("{0}: response is not valid JSON ({1})" -f $url, $_.Exception.Message)); $rels = @() }
+                if ($rels.Count -gt 0) {
+                    try { [System.IO.File]::WriteAllText($cacheFile, $r.Text, (New-Object System.Text.UTF8Encoding($false))) } catch { $messages.Add(("Cache write failed for {0}: {1}" -f $product, $_.Exception.Message)) }
+                    $releases = $rels; $source = 'Live'; $when = (Get-Date).ToString('yyyy-MM-dd HH:mm')
                     break
                 }
-                else { $messages.Add(("{0}: no releases found in the response" -f $url)) }
+                $messages.Add(("{0}: no releases found in the response" -f $url))
+                $liveFail = 'unexpected response format'
+                $tryLegacy = $true
             }
+            if ($source -ne 'Live' -and $liveFail) { $why.Add($liveFail) }
         }
 
-        # 2. Cache (fresh, then stale)
-        if ($releases.Count -eq 0 -and (Test-Path -LiteralPath $cacheFile)) {
-            try {
-                $age = (Get-Date) - (Get-Item -LiteralPath $cacheFile).LastWriteTime
-                $json = Get-Content -LiteralPath $cacheFile -Raw -Encoding UTF8 | ConvertFrom-Json
-                $label = if ($age.TotalDays -le $cacheDays) { 'Cache' } else { 'StaleCache' }
-                $releases = @(ConvertFrom-LifecycleJson -Product $product -Json $json -Source ("endoflife.date ({0})" -f $label.ToLowerInvariant()))
-                if ($releases.Count -gt 0) {
-                    $source = $label; $when = (Get-Item -LiteralPath $cacheFile).LastWriteTime.ToString('yyyy-MM-dd HH:mm')
-                    if ($label -eq 'StaleCache') { $messages.Add(("{0}: using cached dates from {1} ({2:N0} days old) - check them" -f $product, $when, $age.TotalDays)) }
+        # Snapshot releases of this product (parsed lazily)
+        $snapRels = $null
+        $getSnap = {
+            if ($null -eq $snapRels) {
+                $snapRels = @()
+                if ($null -ne $snapshotProducts) {
+                    $snapJson = Get-LiveProperty $snapshotProducts $product
+                    if ($null -ne $snapJson) { $snapRels = @(ConvertFrom-LifecycleJson -Product $product -Json $snapJson -Source 'offline snapshot') }
                 }
             }
-            catch { $messages.Add(("Cache file for {0} could not be read: {1}" -f $product, $_.Exception.Message)); $releases = @() }
+            $snapRels   # the caller collects it with @(& $getSnap)
+        }
+
+        # 2. Cache (fresh, then stale). A stale cache gives way to the shipped snapshot when the snapshot is newer,
+        #    or when the cache has no release for a version-choice family that the snapshot has.
+        if ($releases.Count -eq 0 -and (Test-Path -LiteralPath $cacheFile)) {
+            try {
+                $cacheTime = (Get-Item -LiteralPath $cacheFile).LastWriteTime
+                $age = (Get-Date) - $cacheTime
+                $json = ConvertFrom-LiveJsonText (Get-Content -LiteralPath $cacheFile -Raw -Encoding UTF8)
+                $label = if ($age.TotalDays -le $cacheDays) { 'Cache' } else { 'StaleCache' }
+                $rels = @(ConvertFrom-LifecycleJson -Product $product -Json $json -Source ("endoflife.date ({0})" -f $label.ToLowerInvariant()))
+                $cacheWhen = $cacheTime.ToString('yyyy-MM-dd HH:mm')
+                $useCache = $rels.Count -gt 0
+                if ($useCache -and $label -eq 'StaleCache') {
+                    $snapNow = @(& $getSnap)
+                    $snapRels = $snapNow
+                    if ($snapNow.Count -gt 0) {
+                        if ($null -ne $snapDay -and $snapDay -gt $cacheTime.Date) {
+                            $useCache = $false
+                            $why.Add(('old cache from {0} replaced by the newer shipped snapshot ({1})' -f $cacheWhen, $snapshotDate))
+                        }
+                        elseif ((Get-LifecycleChoiceMatchGap -Settings $Settings -Product $product -Releases $rels -Reference $snapNow)) {
+                            $useCache = $false
+                            $why.Add(('old cache from {0} has no release for a version-choice family - shipped snapshot used' -f $cacheWhen))
+                        }
+                    }
+                }
+                if ($useCache) {
+                    $releases = $rels; $source = $label; $when = $cacheWhen
+                    if ($label -eq 'StaleCache') {
+                        $messages.Add(("{0}: using cached dates from {1} ({2:N0} days old) - check them" -f $product, $when, $age.TotalDays))
+                        $why.Add(('old cached copy from {0} ({1:N0} days) used - check' -f $when, $age.TotalDays))
+                    }
+                }
+            }
+            catch { $messages.Add(("Cache file for {0} could not be read: {1}" -f $product, $_.Exception.Message)); $why.Add('cache file unreadable'); $releases = @() }
         }
 
         # 3. Snapshot shipped with the tool
-        if ($releases.Count -eq 0 -and $null -ne $snapshotProducts) {
-            $snapJson = Get-LiveProperty $snapshotProducts $product
-            if ($null -ne $snapJson) {
-                $releases = @(ConvertFrom-LifecycleJson -Product $product -Json $snapJson -Source 'offline snapshot')
-                if ($releases.Count -gt 0) { $source = 'Snapshot'; $when = $snapshotDate }
-            }
+        if ($releases.Count -eq 0) {
+            $snapNow = @(& $getSnap)
+            if ($snapNow.Count -gt 0) { $releases = $snapNow; $source = 'Snapshot'; $when = $snapshotDate }
         }
 
         if ($releases.Count -gt 0) {
@@ -339,10 +498,27 @@ function Get-LifecycleCatalog {
             $catalog.RetrievedAt[$product] = $when
         }
         else {
+            $catalog.Source[$product] = 'None'
+            $why.Add('not in the cache or the shipped snapshot - settings-file dates used')
             $messages.Add(("{0}: no live, cached or snapshot dates - the settings-file dates are used" -f $product))
         }
+        $catalog.Reason[$product] = (@($why | Where-Object { $_ }) -join '; ')
     }
     return $catalog
+}
+
+function Get-LifecycleChoiceMatchGap {
+    # $true when a VersionChoices family of this product has no matching release in $Releases but has one in $Reference.
+    param([hashtable]$Settings, [string]$Product, [object[]]$Releases, [object[]]$Reference)
+    if (-not $Settings.ContainsKey('VersionChoices')) { return $false }
+    foreach ($vc in @($Settings.VersionChoices)) {
+        if (-not ($vc -is [hashtable]) -or ([string]$vc.Product).Trim().ToLowerInvariant() -ne $Product -or -not $vc.CyclePattern) { continue }
+        $pat = [string]$vc.CyclePattern
+        $inRel = @($Releases | Where-Object { [string]$_.Cycle -match $pat }).Count
+        $inRef = @($Reference | Where-Object { [string]$_.Cycle -match $pat }).Count
+        if ($inRel -eq 0 -and $inRef -gt 0) { return $true }
+    }
+    return $false
 }
 
 function Find-LifecycleRelease {
@@ -385,17 +561,27 @@ function Update-OsLifecycleFromCatalog {
     foreach ($row in @($Settings.OsLifecycle)) {
         if (-not ($row -is [hashtable])) { continue }
         $row['DateSource'] = 'settings file'
-        if (-not $row.ContainsKey('Live') -or [string]::IsNullOrWhiteSpace([string]$row.Live)) { continue }
-        $parts = ([string]$row.Live).Split(':')
-        if ($parts.Count -lt 2) { $changes.Add([pscustomobject]@{ Label = $row.Label; Field = 'Live'; Old = $row.Live; New = ''; Source = "Invalid Live key (expected '<product>:<cycle>')" }); continue }
-        $product = $parts[0].Trim().ToLowerInvariant(); $cycle = ($parts[1..($parts.Count - 1)] -join ':').Trim()
-        $rel = Find-LifecycleRelease -Catalog $Catalog -Product $product -Cycle $cycle
+        $row['LiveProduct'] = ''; $row['LiveFound'] = $false; $row['LiveRelease'] = ''
+        $liveKey = Get-RowLiveKey $row
+        if (-not $liveKey) { continue }
+        $alts = @(Get-LiveKeyAlternatives $liveKey)
+        if ($alts.Count -eq 0) { $changes.Add([pscustomobject]@{ Label = $row.Label; Field = 'Live'; Old = $row.Live; New = ''; Source = "Invalid Live key (expected '<product>:<cycle>', alternatives separated by '|')" }); continue }
+        # first alternative found wins (endoflife.date may name a release e.g. '10-22h2' or '10-22h2-e')
+        $rel = $null; $product = $alts[0].Product; $cycle = $alts[0].Cycle
+        foreach ($a in $alts) {
+            $hit = Find-LifecycleRelease -Catalog $Catalog -Product $a.Product -Cycle $a.Cycle
+            if ($null -ne $hit) { $rel = $hit; $product = $a.Product; $cycle = $a.Cycle; break }
+        }
+        $row['LiveProduct'] = $product
         if ($null -eq $rel) {
-            if ($null -ne $Catalog -and $Catalog.Products.ContainsKey($product)) {
-                $changes.Add([pscustomobject]@{ Label = $row.Label; Field = 'Live'; Old = $row.Live; New = ''; Source = ("Release '{0}' not found in {1} - settings dates kept" -f $cycle, $product) })
+            $inCatalog = @($alts | Where-Object { $null -ne $Catalog -and $Catalog.Products.ContainsKey($_.Product) }).Count -gt 0
+            if ($inCatalog) {
+                $tried = (@($alts | ForEach-Object { $_.Cycle }) -join "' / '")
+                $changes.Add([pscustomobject]@{ Label = $row.Label; Field = 'Live'; Old = $row.Live; New = ''; Source = ("Release '{0}' not found in {1} - settings dates kept" -f $tried, $product) })
             }
             continue
         }
+        $row['LiveFound'] = $true; $row['LiveRelease'] = [string]$rel.Cycle
         $src = $Catalog.Source[$product]; $when = $Catalog.RetrievedAt[$product]
         $fmt = if ($sourceText.ContainsKey($src)) { $sourceText[$src] } else { '{0}' }
         $srcLabel = $fmt -f $when
@@ -436,8 +622,9 @@ function Update-OsLifecycleFromCatalog {
 
 function Resolve-SupportCutoffDate {
     <#
-        SupportCutoffDate: a fixed date 'yyyy-MM-dd', or relative to the run date: 'today+<n>m' (months) / 'today+<n>y' (years).
-        Returns 'yyyy-MM-dd'. Throws on any other text, so a typo cannot silently switch the R06 rule off.
+        A date setting: a fixed date 'yyyy-MM-dd', or relative to the run date: 'today+<n>m' / 'today-<n>m' (months),
+        'today+<n>y' / 'today-<n>y' (years), or 'today'. Used for SupportCutoffDate and VersionChoices.HideEndedBefore.
+        Returns 'yyyy-MM-dd'. Throws on any other text, so a typo cannot silently switch a rule off.
     #>
     param([string]$Value, [datetime]$AsOf = (Get-Date))
     $v = ([string]$Value).Trim()
@@ -445,10 +632,13 @@ function Resolve-SupportCutoffDate {
     if ([datetime]::TryParseExact($v, 'yyyy-MM-dd', [System.Globalization.CultureInfo]::InvariantCulture, [System.Globalization.DateTimeStyles]::None, [ref]$d)) {
         return $d.ToString('yyyy-MM-dd', [System.Globalization.CultureInfo]::InvariantCulture)
     }
-    if ($v -match '^(?i)today\s*\+\s*(\d+)\s*m$') { return $AsOf.Date.AddMonths([int]$Matches[1]).ToString('yyyy-MM-dd', [System.Globalization.CultureInfo]::InvariantCulture) }
-    if ($v -match '^(?i)today\s*\+\s*(\d+)\s*y$') { return $AsOf.Date.AddYears([int]$Matches[1]).ToString('yyyy-MM-dd', [System.Globalization.CultureInfo]::InvariantCulture) }
+    if ($v -match '^(?i)today\s*([+-])\s*(\d+)\s*([my])$') {
+        $n = [int]$Matches[2]; if ($Matches[1] -eq '-') { $n = -$n }
+        $d = if ($Matches[3].ToLowerInvariant() -eq 'm') { $AsOf.Date.AddMonths($n) } else { $AsOf.Date.AddYears($n) }
+        return $d.ToString('yyyy-MM-dd', [System.Globalization.CultureInfo]::InvariantCulture)
+    }
     if ($v -match '^(?i)today$') { return $AsOf.Date.ToString('yyyy-MM-dd', [System.Globalization.CultureInfo]::InvariantCulture) }
-    throw "Setting SupportCutoffDate '$Value' is not valid: use 'yyyy-MM-dd' (e.g. '2027-12-31') or 'today+<n>m' (e.g. 'today+12m')"
+    throw "Setting SupportCutoffDate '$Value' is not valid: use 'yyyy-MM-dd' (e.g. '2027-12-31') or 'today+<n>m' / 'today-<n>m' (e.g. 'today+12m')"
 }
 
 function Get-VmImportDocText {
@@ -463,6 +653,18 @@ function Get-VmImportDocText {
             if ($lt -ge 0) { $i = $lt }
             $h = $h.Substring($i); break
         }
+    }
+    # ... and stop at the end of the article, so footer / feedback / copyright changes do not change the hash
+    $end = -1
+    foreach ($marker in @('id="main-col-footer"', 'Document Conventions', 'Did this page help you?', '</main>', 'id="js_error_message"')) {
+        $j = $h.IndexOf($marker, [System.StringComparison]::OrdinalIgnoreCase)
+        if ($j -gt 0 -and ($end -lt 0 -or $j -lt $end)) { $end = $j }
+    }
+    if ($end -gt 0) {
+        # cut at the '<' of the tag holding the marker when the marker is inside a tag
+        $lt = $h.LastIndexOf('<', $end); $gt = $h.LastIndexOf('>', $end)
+        if ($lt -gt $gt) { $end = $lt }
+        $h = $h.Substring(0, $end)
     }
     $h = [regex]::Replace($h, '(?is)<(script|style|noscript)[^>]*>.*?</\1>', ' ')
     $h = [regex]::Replace($h, '(?s)<[^>]+>', ' ')
@@ -586,6 +788,34 @@ function Get-AwsLiveFacts {
     return $facts
 }
 
+function Get-WindowsAmiPattern {
+    <#
+        Regex that finds the public Windows Server AMI parameter names of one version, e.g. names under
+        /aws/service/ami-windows-latest/ : 'Windows_Server-2012-R2_RTM-English-64Bit-Base', 'Windows_Server-2012-RTM-English-64Bit-Base',
+        'Windows_Server-2016-English-Full-Base', 'Windows_Server-2022-English-Full-Base', 'Windows_Server-2008-R2_SP1-English-64Bit-Base'.
+        2012 must not match the 2012 R2 names (and 2008 not 2008 R2). Version text: '2008', '2008 R2', '2012', '2012 R2', '2016' ...
+    #>
+    param([string]$Version)
+    $v = ([string]$Version).Trim() -replace '_', ' '
+    switch -Regex ($v) {
+        '^2012 R2$' { return 'Windows_Server-2012-R2_' }
+        '^2012$'    { return 'Windows_Server-2012-RTM-' }
+        '^2008 R2$' { return 'Windows_Server-2008-R2_' }
+        '^2008$'    { return 'Windows_Server-2008-SP2-' }
+        '^(\d{4})$' { return ('Windows_Server-{0}-' -f $Matches[1]) }
+        default     { return $null }
+    }
+}
+
+function Test-WindowsAmiOffered {
+    # $true when a standard Windows Server AMI of this version is in the SSM name list (see Get-WindowsAmiPattern).
+    param([object[]]$AmiNames, [string]$Version)
+    $pat = Get-WindowsAmiPattern -Version $Version
+    if (-not $pat) { return $false }
+    $rx = [regex]::Escape($pat)
+    return (@($AmiNames | Where-Object { [string]$_ -match $rx }).Count -gt 0)
+}
+
 function Get-AwsTargetServiceCheck {
     # Which AWS target services the region offers (needs Get-AwsLiveFacts with -Enabled). Returns text for Data_Sources.
     param($AwsFacts)
@@ -636,27 +866,37 @@ function New-DataSourceRows {
     )
     $rows = New-Object System.Collections.Generic.List[object]
     $add = { param($a, $s, $st, $t, $d) $rows.Add([pscustomobject]@{ Area = $a; Source = $s; Status = $st; RetrievedAt = $t; Detail = $d }) }
-    $statusText = @{ 'Live' = 'Live'; 'Cache' = 'Cached copy (recent)'; 'StaleCache' = 'Cached copy (OLD - check)'; 'Snapshot' = 'Offline snapshot (verify)' }
+    $statusText = @{ 'Live' = 'Live'; 'Cache' = 'Cached copy (recent)'; 'StaleCache' = 'Cached copy (OLD - check)'; 'Snapshot' = 'Offline snapshot (verify)'; 'None' = 'Not available - settings dates used' }
 
-    # OS support dates per product
+    # OS support dates: ONE row per product (status + short reason); full error texts are printed on the console only
     if ($null -ne $LifecycleCatalog) {
-        foreach ($p in ($LifecycleCatalog.Products.Keys | Sort-Object)) {
-            $src = $LifecycleCatalog.Source[$p]
+        $reasons = @{}
+        if ($LifecycleCatalog.PSObject.Properties['Reason'] -and $LifecycleCatalog.Reason -is [hashtable]) { $reasons = $LifecycleCatalog.Reason }
+        $products = @(@($LifecycleCatalog.Source.Keys) + @($LifecycleCatalog.Products.Keys) | Sort-Object -Unique)
+        foreach ($p in $products) {
+            $src = [string]$LifecycleCatalog.Source[$p]
             $st = if ($statusText.ContainsKey($src)) { $statusText[$src] } else { $src }
-            $srcName = if ($src -eq 'Snapshot') { 'Config\LifecycleSnapshot.json' } else { 'endoflife.date API' }
-            $used = @()
-            if ($Settings) { $used = @($Settings.OsLifecycle | Where-Object { $_ -is [hashtable] -and $_.ContainsKey('Live') -and ([string]$_.Live).Split(':')[0].Trim().ToLowerInvariant() -eq $p } | ForEach-Object { $_.Label }) }
-            $detail = ('{0} releases.' -f @($LifecycleCatalog.Products[$p]).Count)
-            if ($used.Count -gt 0) { $detail += (' Dates used for: ' + ($used -join ', ') + '.') }
-            if ($p -eq 'windows' -or $p -eq 'windows-server') { $detail += ' Also used for the Exact_OS_Version choices.' }
-            & $add ('OS support dates - ' + $p) $srcName $st $LifecycleCatalog.RetrievedAt[$p] $detail
+            $srcName = switch ($src) { 'Snapshot' { 'Config\LifecycleSnapshot.json' } 'None' { 'settings file' } default { 'endoflife.date API' } }
+            $parts = New-Object System.Collections.Generic.List[string]
+            if ($LifecycleCatalog.Products.ContainsKey($p)) { $parts.Add(('{0} release(s).' -f @($LifecycleCatalog.Products[$p]).Count)) }
+            if ($reasons.ContainsKey($p) -and $reasons[$p]) { $parts.Add(('Why not live: {0}.' -f $reasons[$p])) }
+            if ($Settings) {
+                $rowsP = @($Settings.OsLifecycle | Where-Object { $_ -is [hashtable] -and $_['LiveProduct'] -eq $p })
+                $got  = @($rowsP | Where-Object { $_['LiveFound'] } | ForEach-Object { $_.Label })
+                $kept = @($rowsP | Where-Object { -not $_['LiveFound'] } | ForEach-Object { $_.Label })
+                if ($got.Count -gt 0)  { $parts.Add(('Dates taken from this source for: {0}.' -f ($got -join ', '))) }
+                if ($kept.Count -gt 0) { $parts.Add(('Release not found here, settings-file dates kept for: {0}.' -f ($kept -join ', '))) }
+            }
+            if ($p -eq 'windows' -or $p -eq 'windows-server') { $parts.Add('Also the source of the Exact_OS_Version choices.') }
+            & $add ('OS support dates - ' + $p) $srcName $st $LifecycleCatalog.RetrievedAt[$p] ($parts -join ' ')
         }
-        foreach ($m in $LifecycleCatalog.Messages) { & $add 'OS support dates - note' 'endoflife.date API' 'Note' '' $m }
+        $notes = @()
+        if ($LifecycleCatalog.PSObject.Properties['Notes']) { $notes = @($LifecycleCatalog.Notes) }
+        foreach ($m in $notes) { & $add 'OS support dates - note' 'endoflife.date API' 'Note' '' $m }
     }
     foreach ($c in @($LifecycleChanges)) {
-        if ($null -eq $c) { continue }
-        if ($c.Field -eq 'Live') { & $add 'OS support dates - not updated' 'settings file' 'Settings date kept' '' ('{0}: {1}' -f $c.Label, $c.Source) }
-        else { & $add 'OS support dates - updated' $c.Source 'Changed' '' ('{0} {1}: {2} -> {3}' -f $c.Label, $c.Field, $(if ($c.Old) { $c.Old } else { '(none)' }), $c.New) }
+        if ($null -eq $c -or $c.Field -eq 'Live') { continue }   # 'not found' is part of the product row above
+        & $add 'OS support dates - updated' $c.Source 'Changed' '' ('{0} {1}: {2} -> {3}' -f $c.Label, $c.Field, $(if ($c.Old) { $c.Old } else { '(none)' }), $c.New)
     }
     if ($Settings) {
         $static = @($Settings.OsLifecycle | Where-Object { $_ -is [hashtable] -and $_['DateSource'] -eq 'settings file' } | ForEach-Object { $_.Label })
@@ -683,7 +923,7 @@ function New-DataSourceRows {
         & $add ('AWS services offered in ' + $AwsFacts.Region) 'AWS SSM public parameters' $AwsFacts.Status.RegionServices $t (Get-AwsTargetServiceCheck -AwsFacts $AwsFacts)
         $amiDetail = 'Not checked (needs -UseAwsApis)'
         if (@($AwsFacts.WindowsAmis).Count -gt 0) {
-            $vers = foreach ($v in @('2016', '2019', '2022', '2025', '2012_R2')) { '{0}: {1}' -f ($v -replace '_', ' '), $(if (@($AwsFacts.WindowsAmis | Where-Object { $_ -match ('Windows_Server-' + $v + '-') }).Count -gt 0) { 'offered' } else { 'NOT offered' }) }
+            $vers = foreach ($v in @('2012', '2012 R2', '2016', '2019', '2022', '2025')) { '{0}: {1}' -f $v, $(if (Test-WindowsAmiOffered -AmiNames @($AwsFacts.WindowsAmis) -Version $v) { 'offered' } else { 'NOT offered' }) }
             $amiDetail = 'Standard Windows Server AMIs - ' + ($vers -join '; ')
         }
         & $add 'Windows Server AMIs' 'AWS SSM public parameters' $AwsFacts.Status.WindowsAmis $t $amiDetail
