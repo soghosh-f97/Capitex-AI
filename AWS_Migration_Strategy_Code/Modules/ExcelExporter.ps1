@@ -321,7 +321,9 @@ function Set-StrategyWorkbookFormulas {
         $useVersions = $HaveVersions -and $col.ContainsKey('Exact_OS_Version')
         if ($useVersions) {
             $cExact = $col['Exact_OS_Version']; $ce = & $L $cExact; $cn = & $L $col['VMName']
-            $familyRange = @(New-OSVersionsSheet -Workbook $wb -VersionCatalog $VersionCatalog -ExactRange "Migration_Strategy!`$$ce`$2:`$$ce`$$last" -DropFamilyByRow $DropFamilyByRow) |
+            # Version_Note says 'Not checked yet: ...' only when the version matters for the OS field in use -> drives the counts and highlight
+            $noteRange = if ($col.ContainsKey('Version_Note')) { $cv = & $L $col['Version_Note']; "Migration_Strategy!`$$cv`$2:`$$cv`$$last" } else { '' }
+            $familyRange = @(New-OSVersionsSheet -Workbook $wb -VersionCatalog $VersionCatalog -ExactRange "Migration_Strategy!`$$ce`$2:`$$ce`$$last" -NoteRange $noteRange -DropFamilyByRow $DropFamilyByRow) |
                 Where-Object { $_ -is [hashtable] } | Select-Object -Last 1
             if ($null -eq $familyRange) { $familyRange = @{} }
             $vs = $wb.Worksheets['Strategy_Versions']
@@ -348,18 +350,48 @@ function Set-StrategyWorkbookFormulas {
             }
         }
 
+        # Hidden helper column: the Strategy_Versions row of the chosen version (0 = none chosen / no match).
+        # One MATCH per VM instead of one per result column, and 'IF(row>0, INDEX(...), base)' instead of
+        # 'IFERROR(INDEX(MATCH))': EPPlus' pre-calculation returns 0 (not #N/A) for a failed MATCH, which made
+        # the stored values #VALUE! for viewers that do not recalculate. Excel / LibreOffice give the same result either way.
+        $cLookup = 0
+        if ($useVersions -and $lastV -ge 2) {
+            $cLookup = $ms.Dimension.End.Column + 1
+            $ms.Cells[1, $cLookup].Value = 'Version_Lookup_Row'
+            $ms.Cells[1, $cLookup].Style.Font.Bold = $true
+            $ms.Column($cLookup).Hidden = $true
+        }
+        $cl = if ($cLookup -gt 0) { & $L $cLookup } else { '' }
+        if ($cLookup -gt 0 -and $col.ContainsKey('Version_Note')) {
+            # Rows with a dropdown whose version does not matter for the OS field in use: plain white, so yellow = 'to do'
+            $cvn = & $L $col['Version_Note']
+            $cfx = $ms.ConditionalFormatting.AddExpression($ms.Cells["${ce}2:$ce$last"])
+            $cfx.Formula = "AND(`$${ce}2=""Not checked yet"",LEFT(`$${cvn}2,15)<>""Not checked yet"")"
+            $cfx.Style.Fill.PatternType = [OfficeOpenXml.Style.ExcelFillStyle]::Solid
+            $cfx.Style.Fill.BackgroundColor.Color = [System.Drawing.Color]::White
+            $cfx.Style.Font.Color.Color = [System.Drawing.Color]::FromArgb(128, 128, 128)
+        }
         for ($row = 2; $row -le $last; $row++) {
             $ms.Cells[$row, $cApplied].Formula = "IF(`$$cc$row=""Default"",OS_Choice!`$C`$4,`$$cc$row)"
-            $rowVersions = $useVersions -and $lastV -ge 2 -and $DropFamilyByRow.ContainsKey($row)
+            $rowVersions = $cLookup -gt 0 -and $DropFamilyByRow.ContainsKey($row)
+            if ($rowVersions) {
+                # chosen version: find the scenario by '<VM>|<OS field applied>|<version>'; no match (Not checked yet) = 0
+                $ms.Cells[$row, $cLookup].Formula = "IFERROR(MATCH(`$$cn$row&""|""&`$$ca$row&""|""&`$$ce$row,Strategy_Versions!`$A`$2:`$A`$$lastV,0),0)"
+            }
             foreach ($name in $dynamic) {
                 $t = & $L $hidden['Strategy_VMwareTools'][$name]; $cf = & $L $hidden['Strategy_ConfigFile'][$name]
-                $base = "IF(`$$ca$row=""Configuration file"",Strategy_ConfigFile!$cf$row,Strategy_VMwareTools!$t$row)&"""""
+                $base = "IF(`$$ca$row=""Configuration file"",Strategy_ConfigFile!$cf$row,Strategy_VMwareTools!$t$row)"
                 if ($rowVersions -and $hv.ContainsKey($name)) {
-                    # chosen version: look the scenario up by '<VM>|<OS field applied>|<version>'; no match (Not checked yet) = RVTools label result
                     $vc = & $L $hv[$name]
-                    $ms.Cells[$row, $col[$name]].Formula = "IFERROR(INDEX(Strategy_Versions!`$$vc`$2:`$$vc`$$lastV,MATCH(`$$cn$row&""|""&`$$ca$row&""|""&`$$ce$row,Strategy_Versions!`$A`$2:`$A`$$lastV,0))&"""",$base)"
+                    $hit = "INDEX(Strategy_Versions!`$$vc`$2:`$$vc`$$lastV,`$$cl$row)"
+                    if ($name -eq 'Version_Note') {
+                        # a version was picked but the OS field in use already shows an exact version (or another OS): tell the client
+                        $unused = "IF(`$$ce$row<>""Not checked yet"",""Your choice is not used: the OS field in use (""&`$$ca$row&"") already shows the exact OS. It is used when OS_Field_To_Use is set to the other field."",$base)"
+                        $ms.Cells[$row, $col[$name]].Formula = "IF(`$$cl$row>0,$hit,$unused)&"""""
+                    }
+                    else { $ms.Cells[$row, $col[$name]].Formula = "IF(`$$cl$row>0,$hit,$base)&""""" }
                 }
-                else { $ms.Cells[$row, $col[$name]].Formula = $base }
+                else { $ms.Cells[$row, $col[$name]].Formula = "$base&""""" }
             }
         }
     }
@@ -396,7 +428,7 @@ function Set-StrategyWorkbookFormulas {
         elseif ($m -eq 'VMs - Client confirmation needed') { $sm.Cells[$row, 2].Formula = "COUNTIF($(& $range 'Client_Confirmation'),""?*"")" }
         elseif ($m -like 'VMs - Powered off*(rule R13)')   { $sm.Cells[$row, 2].Formula = "COUNTIF($(& $range 'Rule_Applied'),""R13"")" }
         elseif ($m -like 'OS field deciding the strategy*' -and $HaveBoth) { $sm.Cells[$row, 2].Formula = 'OS_Choice!$C$4' }
-        elseif ($m -like 'VMs - Exact OS version not checked yet*' -and $col.ContainsKey('Exact_OS_Version')) { $sm.Cells[$row, 2].Formula = "COUNTIF($(& $range 'Exact_OS_Version'),""Not checked yet"")" }
+        elseif ($m -like 'VMs - Exact OS version not checked yet*' -and $col.ContainsKey('Exact_OS_Version')) { $sm.Cells[$row, 2].Formula = if ($col.ContainsKey('Version_Note')) { "COUNTIF($(& $range 'Version_Note'),""Not checked yet:*"")" } else { "COUNTIF($(& $range 'Exact_OS_Version'),""Not checked yet"")" } }
     }
 
     $wb.CalcMode = [OfficeOpenXml.ExcelCalcMode]::Automatic
@@ -421,6 +453,7 @@ function New-OSVersionsSheet {
         [Parameter(Mandatory)] $Workbook,
         [Parameter(Mandatory)] [array]$VersionCatalog,
         [Parameter(Mandatory)] [string]$ExactRange,
+        [string]$NoteRange = '',
         [hashtable]$DropFamilyByRow = @{}
     )
     $ws = $Workbook.Worksheets.Add('OS_Versions')
@@ -475,7 +508,8 @@ function New-OSVersionsSheet {
     # ----- live counter -----
     $ws.Cells[$r, 2].Value = 'VMs still waiting for a version choice:'
     $ws.Cells[$r, 2].Style.Font.Bold = $true
-    $ws.Cells[$r, 3].Formula = "COUNTIF($ExactRange,""Not checked yet"")"
+    # counts only VMs where the version matters for the OS field in use (Version_Note starts with 'Not checked yet:')
+    $ws.Cells[$r, 3].Formula = if ($NoteRange) { "COUNTIF($NoteRange,""Not checked yet:*"")" } else { "COUNTIF($ExactRange,""Not checked yet"")" }
     $ws.Cells[$r, 3].Style.Font.Bold = $true; $ws.Cells[$r, 3].Style.Font.Size = 13
     $ws.Cells[$r, 3].Style.HorizontalAlignment = [OfficeOpenXml.Style.ExcelHorizontalAlignment]::Left
     $ws.Cells[$r, 3].Style.Fill.PatternType = $solid; $ws.Cells[$r, 3].Style.Fill.BackgroundColor.SetColor($yellow)

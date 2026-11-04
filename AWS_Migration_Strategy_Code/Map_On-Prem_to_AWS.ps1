@@ -208,8 +208,6 @@ $templateCount     = @($vInfo | Where-Object { Test-RVToolsTrue (Get-RowValue $_
 # (Get-ParameterMapRows and the rule catalogue's .Settings stay available in the module for other tooling)
 $RuleCatalog       = Get-MigrationStrategyRuleCatalog -Settings $StrategySettings -PreferRelocateForLegacyOS:$PreferRelocateForLegacyOS -TemplateCount $templateCount
 
-$Summary    = Build-SummaryReport -EC2Results $EC2Results -EBSResults $EBSResults -BufferPercent $BufferPercent -InstanceSpecCount $InstanceSpecs.Count -StrategyRows $StrategyRows -StrategyRowsAll @($StrategyRowsByField.Values | ForEach-Object { $_ })
-
 #---------------------------------------------------------------------
 # EXACT OS VERSION CHOOSER (v3.0): the client picks e.g. 'Windows 11 24H2' for a VM that RVTools only calls
 # 'Windows 11'. The engine works out every choice in advance, so the workbook updates the moment one is picked.
@@ -224,6 +222,9 @@ if (Get-Command Get-VersionChoiceCatalog -ErrorAction SilentlyContinue) {
     $optionCount = 0; foreach ($fam in $VersionCatalog) { $optionCount += @($fam.Options).Count }
     Write-Host ("Exact OS version chooser: {0} famil(ies), {1} option(s), {2} pre-calculated result row(s)" -f $VersionCatalog.Count, $optionCount, $VersionScenarios.Count)
 }
+
+# Summary after the chooser, so the metric rows also cover values a version choice can produce
+$Summary    = Build-SummaryReport -EC2Results $EC2Results -EBSResults $EBSResults -BufferPercent $BufferPercent -InstanceSpecCount $InstanceSpecs.Count -StrategyRows $StrategyRows -StrategyRowsAll @($StrategyRowsByField.Values | ForEach-Object { $_ }) -VersionScenarioRows $VersionScenarios
 
 #---------------------------------------------------------------------
 # DATA SOURCES sheet: where every value of this run came from
