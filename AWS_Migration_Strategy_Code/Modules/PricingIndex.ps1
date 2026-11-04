@@ -2,36 +2,76 @@
 # AWS PRICING FILE DOWNLOAD
 #---------------------------------------------------------------------
 function Get-AWSBulkPricingFile {
+    <#
+        Live AWS bulk pricing file (no login), cached for CacheDays. Fallbacks: a cached copy older than CacheDays is
+        used (with a warning) when the download fails or -Offline is set. The download goes to a temporary file first,
+        so a broken download never replaces a good cached copy.
+    #>
     param(
         [string]$ServiceCode = "AmazonEC2",
         [string]$RegionCode,
-        [string]$CacheDir = "$env:TEMP\AWSPricingCache"
+        [string]$CacheDir,
+        [double]$CacheDays = 7,
+        [switch]$Offline
     )
- 
-    if (-not (Test-Path $CacheDir)) { New-Item -ItemType Directory -Path $CacheDir | Out-Null }
+
+    if ([string]::IsNullOrWhiteSpace($CacheDir)) {
+        $tempBase = $env:TEMP
+        if ([string]::IsNullOrWhiteSpace($tempBase)) { $tempBase = [System.IO.Path]::GetTempPath() }   # TEMP is unset on Linux / macOS
+        $CacheDir = Join-Path $tempBase 'AWSPricingCache'
+    }
+    if (-not (Test-Path -LiteralPath $CacheDir)) { New-Item -ItemType Directory -Path $CacheDir -Force | Out-Null }
     $cacheFile = Join-Path $CacheDir "$ServiceCode`_$RegionCode.csv"
- 
-    if (Test-Path $cacheFile) {
-        $age = (Get-Date) - (Get-Item $cacheFile).LastWriteTime
-        if ($age.TotalDays -lt 7) {
+
+    $haveCache = Test-Path -LiteralPath $cacheFile
+    if ($haveCache) {
+        $age = (Get-Date) - (Get-Item -LiteralPath $cacheFile).LastWriteTime
+        if ($age.TotalDays -lt $CacheDays) {
             Write-Host "Using cached pricing file for $RegionCode (age: $([math]::Round($age.TotalHours,1))h)" -ForegroundColor DarkGray
             return $cacheFile
         }
+        if ($Offline) {
+            Write-Warning ("-Offline: using the cached pricing file for {0}, {1:N0} days old - prices may be out of date." -f $RegionCode, $age.TotalDays)
+            return $cacheFile
+        }
     }
- 
+    elseif ($Offline) {
+        Write-Error "-Offline: no cached pricing file for $RegionCode in $CacheDir - run once with internet access first."
+        return $null
+    }
+
     $url = "https://pricing.us-east-1.amazonaws.com/offers/v1.0/aws/$ServiceCode/current/$RegionCode/index.csv"
     Write-Host "Downloading pricing data for $RegionCode (one-time, may take a few minutes)..." -ForegroundColor Yellow
- 
+
+    $partFile = $cacheFile + '.download'
     try {
-        Invoke-WebRequest -Uri $url -OutFile $cacheFile -UseBasicParsing
+        if ($PSVersionTable.PSVersion.Major -lt 6) {
+            try { [Net.ServicePointManager]::SecurityProtocol = [Net.ServicePointManager]::SecurityProtocol -bor [Net.SecurityProtocolType]::Tls12 } catch { }
+        }
+        Invoke-WebRequest -Uri $url -OutFile $partFile -UseBasicParsing -ErrorAction Stop
+        Move-Item -LiteralPath $partFile -Destination $cacheFile -Force
         Write-Host "Download complete: $cacheFile" -ForegroundColor Green
     }
     catch {
+        if (Test-Path -LiteralPath $partFile) { Remove-Item -LiteralPath $partFile -Force -ErrorAction SilentlyContinue }
+        if ($haveCache) {
+            Write-Warning "Failed to download pricing file for $RegionCode ($($_.Exception.Message)) - using the older cached copy: $cacheFile"
+            return $cacheFile
+        }
         Write-Error "Failed to download pricing file for $RegionCode : $_"
         return $null
     }
- 
+
     return $cacheFile
+}
+
+function Test-ArmInstanceType {
+    # $true for ARM (AWS Graviton) instance types. Primary signal: the pricing file's 'Physical Processor' text
+    # ('AWS Graviton2 Processor', ...). Backup when it is blank: the instance name (a1, t4g, m7g, c8gn, x2gd, im4gn, ...).
+    param([string]$InstanceType, [string]$PhysicalProcessor)
+    if ($PhysicalProcessor -match 'Graviton') { return $true }
+    if (-not [string]::IsNullOrWhiteSpace($PhysicalProcessor)) { return $false }
+    return ($InstanceType -match '^a1\.' -or $InstanceType -match '^[a-z]+\d+g[a-z]*(-[a-z]+)?\.')
 }
  
 #---------------------------------------------------------------------
@@ -59,7 +99,7 @@ function Build-AWSPricingIndex {
     $colIndex = @{}
     for ($i = 0; $i -lt $headers.Count; $i++) { $colIndex[$headers[$i]] = $i }
  
-    $requiredCols = @('Product Family','Operating System','Tenancy','CapacityStatus','Pre Installed S/W','Current Generation','TermType','Instance Type','vCPU','Memory','Instance Family','PricePerUnit','Unit','Volume API Name','Group','LeaseContractLength','PurchaseOption','OfferingClass','PriceDescription')
+    $requiredCols = @('Product Family','Operating System','Tenancy','CapacityStatus','Pre Installed S/W','Current Generation','TermType','Instance Type','vCPU','Memory','Instance Family','PricePerUnit','Unit','Volume API Name','Group','LeaseContractLength','PurchaseOption','OfferingClass','PriceDescription','Physical Processor')
     foreach ($c in $requiredCols) {
         if (-not $colIndex.ContainsKey($c)) { Write-Warning "Column '$c' not found in CSV header!" }
     }
@@ -134,12 +174,19 @@ function Build-AWSPricingIndex {
                     }
                     if ($instType -match '^t[2-4][a-z]?\.') { $familyNorm = 'Burstable' }
  
+                    # CPU architecture from the live pricing file: VMware VMs are x86, so ARM (Graviton) types are excluded in sizing
+                    $physProc = ''
+                    if ($colIndex.ContainsKey('Physical Processor')) { $physProc = [string]$fields[$colIndex['Physical Processor']] }
+                    $arch = if (Test-ArmInstanceType -InstanceType $instType -PhysicalProcessor $physProc) { 'arm64' } else { 'x86_64' }
+
                     if ([double]$vcpu -gt 0 -and $ramGiB -gt 0) {
                         $instanceSpecMap[$instType] = [PSCustomObject]@{
-                            Type   = $instType
-                            vCPU   = [double]$vcpu
-                            RAM    = $ramGiB
-                            Family = $familyNorm
+                            Type         = $instType
+                            vCPU         = [double]$vcpu
+                            RAM          = $ramGiB
+                            Family       = $familyNorm
+                            Architecture = $arch
+                            Processor    = $physProc
                         }
                     }
                 }
@@ -206,9 +253,11 @@ function Build-AWSPricingIndex {
     if (-not $ebsIo2Price)           { $ebsIo2Price = 0 }
     if (-not $ebsIo2IOPSPrice)       { $ebsIo2IOPSPrice = 0 }
  
-    Write-Host "Index built. Rows scanned: $rowCount | Unique instance specs: $($instanceSpecMap.Count) | OnDemand entries: $($ec2PriceMap.Count) | 3yr-RI entries: $($ec2RIPriceMap.Count) | gp3 price: `$$ebsGp3Price/GB-Mo | io2 price: `$$ebsIo2Price/GB-Mo" -ForegroundColor Green
- 
+    $armCount = @($instanceSpecMap.Values | Where-Object { $_.Architecture -eq 'arm64' }).Count
+    Write-Host "Index built. Rows scanned: $rowCount | Unique instance specs: $($instanceSpecMap.Count) (ARM/Graviton, excluded from sizing: $armCount) | OnDemand entries: $($ec2PriceMap.Count) | 3yr-RI entries: $($ec2RIPriceMap.Count) | gp3 price: `$$ebsGp3Price/GB-Mo | io2 price: `$$ebsIo2Price/GB-Mo" -ForegroundColor Green
+
     return [PSCustomObject]@{
+        ArmInstanceTypeCount   = $armCount
         InstanceSpecMap        = $instanceSpecMap
         EC2PriceMap            = $ec2PriceMap
         EC2RIPriceMap          = $ec2RIPriceMap

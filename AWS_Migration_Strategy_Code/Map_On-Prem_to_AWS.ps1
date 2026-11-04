@@ -19,7 +19,7 @@ param(
     # --- Migration strategy (Parameter_Map automation) ---
     # Settings file with every keyword list / threshold / lookup used by the strategy rules
     [Parameter(Mandatory=$false)]
-    [string]$StrategySettingsPath = (Join-Path $PSScriptRoot "Config\AWSMigrationStrategySettings.psd1"),
+    [string]$StrategySettingsPath = (Join-Path (Join-Path $PSScriptRoot 'Config') 'AWSMigrationStrategySettings.psd1'),
 
     # Optional CSV/XLSX with columns VMName, OS - guest-check results that override the RVTools OS strings
     [Parameter(Mandatory=$false)]
@@ -36,7 +36,25 @@ param(
     # Empty = setting DefaultOSField. Both versions are always worked out, so the client can switch in the workbook.
     [Parameter(Mandatory = $false)]
     [ValidateSet('', 'VMwareTools', 'ConfigFile')]
-    [string]$OSFieldDefault = ''
+    [string]$OSFieldDefault = '',
+
+    # --- Live data (v3.0) ---
+    # No internet at all: OS support dates from the local cache / Config\LifecycleSnapshot.json, pricing from the cached file
+    [Parameter(Mandatory = $false)]
+    [switch]$Offline,
+
+    # Also ask AWS (needs the AWS CLI + read-only credentials): exact max NICs and CPU architecture per instance type,
+    # services offered in the region, standard Windows AMIs. Without it, built-in tables are used.
+    [Parameter(Mandatory = $false)]
+    [switch]$UseAwsApis,
+
+    # Region for the -UseAwsApis checks
+    [Parameter(Mandatory = $false)]
+    [string]$AwsRegion = 'eu-central-1',
+
+    # A previous output workbook: the client's choices in it (OS_Field_To_Use, Exact_OS_Version) are carried over
+    [Parameter(Mandatory = $false)]
+    [string]$ReuseChoicesFrom
 )
 
 # Pre-checks
@@ -50,18 +68,53 @@ if (-not (Test-Path $InputExcelPath)) { Write-Error "Input file not found: $Inpu
 
 $Buffer = 1 + ($BufferPercent / 100)
 
-# Load all function modules
-. "$PSScriptRoot\Modules\OSMapping.ps1"
-. "$PSScriptRoot\Modules\InstanceSizing.ps1"
-. "$PSScriptRoot\Modules\PricingIndex.ps1"
-. "$PSScriptRoot\Modules\VMProcessor.ps1"
-. "$PSScriptRoot\Modules\DiskProcessor.ps1"
-. "$PSScriptRoot\Modules\SummaryBuilder.ps1"
-. "$PSScriptRoot\Modules\ExcelExporter.ps1"
-. "$PSScriptRoot\Modules\MigrationStrategyGenerator.ps1"
+# Load all function modules (Join-Path so the script also runs under PowerShell 7 on Linux / macOS)
+$moduleDir = Join-Path $PSScriptRoot 'Modules'
+foreach ($moduleFile in @('LiveDataProviders.ps1', 'OSMapping.ps1', 'InstanceSizing.ps1', 'PricingIndex.ps1', 'VMProcessor.ps1',
+                          'DiskProcessor.ps1', 'SummaryBuilder.ps1', 'ExcelExporter.ps1', 'MigrationStrategyGenerator.ps1')) {
+    . (Join-Path $moduleDir $moduleFile)
+}
 
 # Strategy settings are validated before the (slow) pricing download, so a bad settings file fails fast
 $StrategySettings = Get-MigrationStrategyDefaults -SettingsPath $StrategySettingsPath
+$StrategyAsOf     = Get-Date   # one date for every lifecycle check in this run (support dates are compared with it)
+
+#---------------------------------------------------------------------
+# LIVE DATA (v3.0): OS support dates, support cut-off, AWS VM Import page check
+# Each source falls back (cache -> offline snapshot -> settings file); the sheet Data_Sources shows what was used.
+#---------------------------------------------------------------------
+Write-Host "=== Live data ===" -ForegroundColor Cyan
+$LiveCacheDir     = Get-LiveCacheRoot
+$LifecycleCatalog = Get-LifecycleCatalog -Settings $StrategySettings -Offline:$Offline -CacheDir $LiveCacheDir
+$LifecycleChanges = @(Update-OsLifecycleFromCatalog -Settings $StrategySettings -Catalog $LifecycleCatalog)
+foreach ($p in ($LifecycleCatalog.Products.Keys | Sort-Object)) {
+    Write-Host ("  OS support dates {0,-15}: {1} ({2})" -f $p, $LifecycleCatalog.Source[$p], $LifecycleCatalog.RetrievedAt[$p])
+}
+$dateChanges = @($LifecycleChanges | Where-Object { $_.Field -ne 'Live' })
+if ($dateChanges.Count -gt 0) { Write-Host ("  {0} OS support date(s) differ from the settings file and were updated (see sheet Data_Sources)" -f $dateChanges.Count) -ForegroundColor Yellow }
+foreach ($m in @($LifecycleCatalog.Messages)) { Write-Host "  note: $m" -ForegroundColor DarkGray }
+
+# SupportCutoffDate may be relative ('today+12m'): resolved once, so every rule and sheet uses the same date
+$CutoffSetting = [string]$StrategySettings.SupportCutoffDate
+try { $StrategySettings['SupportCutoffDate'] = Resolve-SupportCutoffDate -Value $CutoffSetting -AsOf $StrategyAsOf }
+catch { Write-Error $_.Exception.Message; exit 1 }
+Write-Host ("  Support cut-off date (R06): {0}{1}" -f $StrategySettings.SupportCutoffDate, $(if ($CutoffSetting -ne $StrategySettings.SupportCutoffDate) { " (from '$CutoffSetting')" } else { '' }))
+
+$VmImportCheck = Test-VmImportDocChanged -Settings $StrategySettings -Offline:$Offline
+if ($VmImportCheck.Status -eq 'Changed') { Write-Warning ("AWS VM Import page has changed since the settings were reviewed - " + $VmImportCheck.Detail) }
+else { Write-Host ("  AWS VM Import page: {0}" -f $VmImportCheck.Status) }
+
+# Client choices from a previous workbook - read now, before an output file with the same name is replaced
+$PriorChoices = @{}
+if ($ReuseChoicesFrom) {
+    if (-not (Test-Path -LiteralPath $ReuseChoicesFrom)) { Write-Error "Previous workbook not found: $ReuseChoicesFrom"; exit 1 }
+    if (Get-Command Import-WorkbookChoices -ErrorAction SilentlyContinue) {
+        $PriorChoices = Import-WorkbookChoices -Path $ReuseChoicesFrom
+        if ($null -eq $PriorChoices) { $PriorChoices = @{} }
+        Write-Host ("  Client choices carried over from {0}: {1} VM(s)" -f $ReuseChoicesFrom, $PriorChoices.Count) -ForegroundColor Green
+    }
+    else { Write-Warning "-ReuseChoicesFrom: this version of the engine cannot read previous choices - ignored." }
+}
 
 # Site / vCenter name: -SiteName, else taken from the input file name ('DE-HUB_RVTools_export_all_....xlsx' -> 'DE-HUB')
 if ([string]::IsNullOrWhiteSpace($SiteName)) {
@@ -82,14 +135,19 @@ if (Test-Path -LiteralPath $OutputExcelPath) {
 Write-Host "Site: $SiteName  ->  output: $OutputExcelPath" -ForegroundColor Cyan
 
 # Pipeline
-$csvPathUS = Get-AWSBulkPricingFile -RegionCode "us-east-1"
-$csvPathDE = Get-AWSBulkPricingFile -RegionCode "eu-central-1"
+$csvPathUS = Get-AWSBulkPricingFile -RegionCode "us-east-1" -Offline:$Offline
+$csvPathDE = Get-AWSBulkPricingFile -RegionCode "eu-central-1" -Offline:$Offline
 if (-not $csvPathUS -or -not $csvPathDE) { Write-Error "Could not obtain pricing files."; exit 1 }
 
 $USIndex = Build-AWSPricingIndex -CsvPath $csvPathUS
 $DEIndex = Build-AWSPricingIndex -CsvPath $csvPathDE
 $InstanceSpecs = $USIndex.InstanceSpecMap.Values
 if (-not $InstanceSpecs -or $InstanceSpecs.Count -eq 0) { Write-Error "Instance spec table is empty."; exit 1 }
+
+# Optional AWS API facts (exact NIC limits / CPU architectures / region services / Windows AMIs). Read by the sizing
+# and OS-mapping modules through the variable name $AwsLiveFacts - set it before sizing.
+$AwsLiveFacts = Get-AwsLiveFacts -Region $AwsRegion -Enabled:$UseAwsApis
+foreach ($m in @($AwsLiveFacts.Messages)) { Write-Host "  note: $m" -ForegroundColor DarkGray }
 
 $vInfo = @(Import-Excel -Path $InputExcelPath -WorksheetName "vInfo")
 if ($vInfo.Count -eq 0) { Write-Error "The vInfo tab in $InputExcelPath has no rows - nothing to size or classify."; exit 1 }
@@ -134,7 +192,6 @@ if ($OSOverridePath) {
 }
 
 $StrategyInventory = Build-StrategyInventory -VInfoData $vInfo -VDiskData $vDisk -OSOverrides $osOverrides -Settings $StrategySettings
-$StrategyAsOf      = Get-Date   # one date for every lifecycle check in this run (support dates are compared with it)
 Write-Host ("Strategy lifecycle checks as of {0:yyyy-MM-dd}" -f $StrategyAsOf)
 
 # The strategy is worked out for BOTH OS fields, so the client can switch in the workbook (sheet OS_Choice)
@@ -153,9 +210,55 @@ $RuleCatalog       = Get-MigrationStrategyRuleCatalog -Settings $StrategySetting
 
 $Summary    = Build-SummaryReport -EC2Results $EC2Results -EBSResults $EBSResults -BufferPercent $BufferPercent -InstanceSpecCount $InstanceSpecs.Count -StrategyRows $StrategyRows -StrategyRowsAll @($StrategyRowsByField.Values | ForEach-Object { $_ })
 
-Export-MigrationReport -EC2Results $EC2Results -EBSResults $EBSResults -Summary $Summary -OutputPath $OutputExcelPath `
-    -StrategyRows $StrategyRows -StrategyRowsByField $StrategyRowsByField -DefaultOSField $OSFieldDefault `
-    -RuleCatalog $RuleCatalog
+#---------------------------------------------------------------------
+# EXACT OS VERSION CHOOSER (v3.0): the client picks e.g. 'Windows 11 24H2' for a VM that RVTools only calls
+# 'Windows 11'. The engine works out every choice in advance, so the workbook updates the moment one is picked.
+#---------------------------------------------------------------------
+$VersionCatalog   = @()
+$VersionScenarios = @()
+if (Get-Command Get-VersionChoiceCatalog -ErrorAction SilentlyContinue) {
+    $VersionCatalog = @(Get-VersionChoiceCatalog -Settings $StrategySettings -LifecycleCatalog $LifecycleCatalog)
+    if ($VersionCatalog.Count -gt 0 -and (Get-Command Get-VersionScenarioRows -ErrorAction SilentlyContinue)) {
+        $VersionScenarios = @(Get-VersionScenarioRows -StrategyInventory $StrategyInventory -Settings $StrategySettings -VersionCatalog $VersionCatalog -PreferRelocateForLegacyOS:$PreferRelocateForLegacyOS -AsOf $StrategyAsOf)
+    }
+    $optionCount = 0; foreach ($fam in $VersionCatalog) { $optionCount += @($fam.Options).Count }
+    Write-Host ("Exact OS version chooser: {0} famil(ies), {1} option(s), {2} pre-calculated result row(s)" -f $VersionCatalog.Count, $optionCount, $VersionScenarios.Count)
+}
+
+#---------------------------------------------------------------------
+# DATA SOURCES sheet: where every value of this run came from
+#---------------------------------------------------------------------
+$pricingInfo = @()
+foreach ($pf in @(@{ Region = 'us-east-1'; Path = $csvPathUS }, @{ Region = 'eu-central-1'; Path = $csvPathDE })) {
+    $i = Get-PricingFileInfo -CsvPath $pf.Path
+    $i | Add-Member -NotePropertyName Region -NotePropertyValue $pf.Region -Force
+    $pricingInfo += $i
+}
+$DataSources = @(New-DataSourceRows -LifecycleCatalog $LifecycleCatalog -LifecycleChanges $LifecycleChanges -VmImportCheck $VmImportCheck `
+    -AwsFacts $AwsLiveFacts -PricingFiles $pricingInfo -CutoffSetting $CutoffSetting -CutoffResolved ([string]$StrategySettings.SupportCutoffDate) `
+    -ArmTypesExcluded ([int]$USIndex.ArmInstanceTypeCount) -Settings $StrategySettings)
+
+# The new workbook parameters are passed only when the exporter supports them (keeps this script usable with older modules)
+$exportArgs = @{
+    EC2Results          = $EC2Results
+    EBSResults          = $EBSResults
+    Summary             = $Summary
+    OutputPath          = $OutputExcelPath
+    StrategyRows        = $StrategyRows
+    StrategyRowsByField = $StrategyRowsByField
+    DefaultOSField      = $OSFieldDefault
+    RuleCatalog         = $RuleCatalog
+}
+$exportParams = (Get-Command Export-MigrationReport).Parameters
+$optionalExport = @{ VersionCatalog = $VersionCatalog; VersionScenarios = $VersionScenarios; PriorChoices = $PriorChoices; DataSources = $DataSources }
+foreach ($k in $optionalExport.Keys) {
+    if ($exportParams.ContainsKey($k)) { $exportArgs[$k] = $optionalExport[$k] }
+    elseif ($k -eq 'DataSources') { Write-Warning "This exporter has no Data_Sources sheet - the data sources are listed below instead." }
+}
+Export-MigrationReport @exportArgs
+if (-not $exportParams.ContainsKey('DataSources')) {
+    $DataSources | Format-Table Area, Status, RetrievedAt -AutoSize | Out-String -Width 200 | Write-Host
+}
 
 Write-Host "Migration strategy distribution (OS field: $OSFieldDefault):" -ForegroundColor Cyan
 $StrategyRows | Group-Object Migration_Strategy | Sort-Object Count -Descending |

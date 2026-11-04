@@ -25,7 +25,21 @@
     infrastructure services (#16) and ISO connected (#24). Anti-affinity (#30) is a design note.
 #>
 @{
-    SettingsVersion = '2.2'                    # Version of this settings file (for reference only; not used by the rules).
+    SettingsVersion = '3.0'                    # Version of this settings file (for reference only; not used by the rules).
+
+    #---------------------------------------------------------------------------------------------
+    # 0. LIVE DATA (v3.0) - values read from live sources at run time; every source has a fallback and the
+    #    workbook sheet Data_Sources shows where each value came from (Live / cached copy / offline snapshot / settings file).
+    #---------------------------------------------------------------------------------------------
+    LiveData = @{
+        Enabled              = $true      # $true = read OS support dates and Windows versions from endoflife.date and check the AWS VM Import page; $false = never use the internet (offline snapshot + dates below).
+        CacheDays            = 7          # Days a downloaded copy is reused before it is downloaded again (an older copy is still used, with a warning, when the internet is not reachable).
+        LifecycleApiBase     = 'https://endoflife.date/api/v1/products'   # OS support dates API (no login). Products used: the 'Live' keys of OsLifecycle and VersionChoices.
+        LifecycleLegacyBase  = 'https://endoflife.date/api'               # Older version of the same API, tried when the first one fails.
+        VmImportDocUrl       = 'https://docs.aws.amazon.com/vm-import/latest/userguide/prerequisites.html'   # AWS VM Import rules page (no API exists): its text is hashed to detect changes.
+        VmImportDocKnownHash = ''         # SHA-256 of the VM Import page text when sections 7-8 were last reviewed ('' = not recorded yet; the run prints the current hash on Data_Sources).
+        TimeoutSec           = 30         # Seconds to wait for each live source before falling back.
+    }
 
     #---------------------------------------------------------------------------------------------
     # 1. OS FIELD (which RVTools OS column decides)
@@ -120,8 +134,11 @@
     #    EndOfSupport = vendor standard support end; ExtendedEnd = end of the paid extension available
     #    OUTSIDE Azure (Microsoft ESU / Red Hat ELS / SUSE LTSS / Ubuntu Pro); '' = none / not tracked.
     #    First match wins - keep specific patterns above generic ones. Review dates before each run.
+    #    Live = '<product>:<release>' (endoflife.date) -> EndOfSupport / ExtendedEnd are refreshed from the API at run time;
+    #    the dates typed here are the fallback. An empty live value never erases a date typed here. LiveEndField = 'eoes'
+    #    takes the API's extended (LTS) end as EndOfSupport, for rows whose support end here is the free LTS end (Debian).
     #---------------------------------------------------------------------------------------------
-    SupportCutoffDate      = '2027-12-31'      # [R06] Cut-off date (yyyy-MM-dd): an OS whose support ends before it counts as old.
+    SupportCutoffDate      = '2027-12-31'      # [R06] Cut-off date: an OS whose support ends before it counts as old. A fixed date 'yyyy-MM-dd', or relative to the run date: 'today+12m' (months) / 'today+2y' (years).
     LegacyOsStrategy       = 'Replatform'      # [R06] Strategy for an old OS: 'Replatform' (upgrade/rebuild in the move) or 'Rehost' (move as-is, upgrade later).
     PreferRelocateForLegacyOS = $false         # [R06] $true = OS past ALL support goes to Relocate (VMware in AWS) instead; script switch can force it on.
     RelocateTarget         = 'Amazon Elastic VMware Service (Amazon EVS) or VMware Cloud on AWS, via VMware HCX'   # [R06] AWS target text for Relocate.
@@ -130,45 +147,45 @@
     Arch32BitNote          = 'AWS VM Import stopped accepting 32-bit (i386) images on 1 Apr 2026'   # [R06] Reason text shown for 32-bit VMs.
     # [R06] Support end dates per OS version (yyyy-MM-dd; '' = none/unknown); sets OS_Status. First match wins.
     OsLifecycle = @(
-        @{ Match = 'Windows Server\D*2003|Windows (NT|2000|XP|Vista)\b'; Label = 'Windows Server 2003 / XP or older'; EndOfSupport = '2015-07-14'; ExtendedEnd = '';           Note = 'No extended support available' }
-        @{ Match = 'Windows Server\D*2008';                  Label = 'Windows Server 2008 / 2008 R2'; EndOfSupport = '2020-01-14'; ExtendedEnd = '2023-01-10'; Note = 'ESU ended Jan 2023 outside Azure' }
-        @{ Match = 'Windows Server\D*2012';                  Label = 'Windows Server 2012 / 2012 R2'; EndOfSupport = '2023-10-10'; ExtendedEnd = '2026-10-13'; Note = 'Paid ESU ended Oct 2026' }
+        @{ Match = 'Windows Server\D*2003|Windows (NT|2000|XP|Vista)\b'; Label = 'Windows Server 2003 / XP or older'; EndOfSupport = '2015-07-14'; ExtendedEnd = '';           Live = 'windows-server:2003-r2-sp2'; Note = 'No extended support available' }
+        @{ Match = 'Windows Server\D*2008';                  Label = 'Windows Server 2008 / 2008 R2'; EndOfSupport = '2020-01-14'; ExtendedEnd = '2023-01-10'; Live = 'windows-server:2008-r2-sp1'; Note = 'ESU ended Jan 2023 outside Azure' }
+        @{ Match = 'Windows Server\D*2012';                  Label = 'Windows Server 2012 / 2012 R2'; EndOfSupport = '2023-10-10'; ExtendedEnd = '2026-10-13'; Live = 'windows-server:2012-r2'; Note = 'Paid ESU ended Oct 2026' }
         @{ Match = 'Windows Server\D*2016 or later';         Label = 'Windows Server 2016 or later (exact version unknown)'; EndOfSupport = ''; ExtendedEnd = ''; Note = 'Grouped VMware label - confirm the exact version' }
-        @{ Match = 'Windows Server\D*2016';                  Label = 'Windows Server 2016';           EndOfSupport = '2027-01-12'; ExtendedEnd = '';           Note = '' }
-        @{ Match = 'Windows Server\D*2019';                  Label = 'Windows Server 2019';           EndOfSupport = '2029-01-09'; ExtendedEnd = '';           Note = '' }
-        @{ Match = 'Windows Server\D*2022';                  Label = 'Windows Server 2022';           EndOfSupport = '2031-10-14'; ExtendedEnd = '';           Note = '' }
-        @{ Match = 'Windows Server\D*2025';                  Label = 'Windows Server 2025';           EndOfSupport = '2034-11-14'; ExtendedEnd = '';           Note = '' }
-        @{ Match = 'Windows 7\b';                            Label = 'Windows 7';                     EndOfSupport = '2020-01-14'; ExtendedEnd = '2023-01-10'; Note = 'ESU ended Jan 2023' }
-        @{ Match = 'Windows 8';                              Label = 'Windows 8 / 8.1';               EndOfSupport = '2023-01-10'; ExtendedEnd = '';           Note = '' }
-        @{ Match = 'Windows 10\b';                           Label = 'Windows 10';                    EndOfSupport = '2025-10-14'; ExtendedEnd = '2028-10-10'; Note = 'Paid ESU per device (free only on Microsoft clouds)' }
+        @{ Match = 'Windows Server\D*2016';                  Label = 'Windows Server 2016';           EndOfSupport = '2027-01-12'; ExtendedEnd = '';           Live = 'windows-server:2016'; Note = '' }
+        @{ Match = 'Windows Server\D*2019';                  Label = 'Windows Server 2019';           EndOfSupport = '2029-01-09'; ExtendedEnd = '';           Live = 'windows-server:2019'; Note = '' }
+        @{ Match = 'Windows Server\D*2022';                  Label = 'Windows Server 2022';           EndOfSupport = '2031-10-14'; ExtendedEnd = '';           Live = 'windows-server:2022'; Note = '' }
+        @{ Match = 'Windows Server\D*2025';                  Label = 'Windows Server 2025';           EndOfSupport = '2034-11-14'; ExtendedEnd = '';           Live = 'windows-server:2025'; Note = '' }
+        @{ Match = 'Windows 7\b';                            Label = 'Windows 7';                     EndOfSupport = '2020-01-14'; ExtendedEnd = '2023-01-10'; Live = 'windows:7-sp1'; Note = 'ESU ended Jan 2023' }
+        @{ Match = 'Windows 8';                              Label = 'Windows 8 / 8.1';               EndOfSupport = '2023-01-10'; ExtendedEnd = '';           Live = 'windows:8.1'; Note = '' }
+        @{ Match = 'Windows 10\b';                           Label = 'Windows 10';                    EndOfSupport = '2025-10-14'; ExtendedEnd = '2028-10-10'; Live = 'windows:10-22h2'; Note = 'Paid ESU per device (free only on Microsoft clouds)' }
         @{ Match = 'Windows 11\b';                           Label = 'Windows 11';                    EndOfSupport = '';           ExtendedEnd = '';           Note = 'Support depends on the feature-update version' }
-        @{ Match = '(Red Hat Enterprise Linux|RHEL)\D*\b[2-5](\.\d+)?\b'; Label = 'RHEL 5 or older'; EndOfSupport = '2017-03-31'; ExtendedEnd = '2020-11-30'; Note = '' }
-        @{ Match = '(Red Hat Enterprise Linux|RHEL)\D*\b6(\.\d+)?\b';    Label = 'RHEL 6';          EndOfSupport = '2020-11-30'; ExtendedEnd = '2024-06-30'; Note = 'ELS ended Jun 2024' }
-        @{ Match = '(Red Hat Enterprise Linux|RHEL)\D*\b7(\.\d+)?\b';    Label = 'RHEL 7';          EndOfSupport = '2024-06-30'; ExtendedEnd = '2028-06-30'; Note = 'ELS add-on required' }
-        @{ Match = '(Red Hat Enterprise Linux|RHEL)\D*\b8(\.\d+)?\b';    Label = 'RHEL 8';          EndOfSupport = '2029-05-31'; ExtendedEnd = '2032-05-31'; Note = '' }
-        @{ Match = '(Red Hat Enterprise Linux|RHEL)\D*\b9(\.\d+)?\b';    Label = 'RHEL 9';          EndOfSupport = '2032-05-31'; ExtendedEnd = '2035-05-31'; Note = '' }
-        @{ Match = '(Red Hat Enterprise Linux|RHEL)\D*\b10(\.\d+)?\b';   Label = 'RHEL 10';         EndOfSupport = '2035-05-31'; ExtendedEnd = '2038-05-31'; Note = '' }
-        @{ Match = 'Oracle Linux\D*\b[4-6](\.\d+)?\b';       Label = 'Oracle Linux 6 or older';      EndOfSupport = '2021-03-01'; ExtendedEnd = '2024-12-31'; Note = '' }
-        @{ Match = 'Oracle Linux\D*\b7(\.\d+)?\b';           Label = 'Oracle Linux 7';               EndOfSupport = '2024-12-31'; ExtendedEnd = '2028-06-30'; Note = 'Extended support required' }
-        @{ Match = 'Oracle Linux\D*\b8(\.\d+)?\b';           Label = 'Oracle Linux 8';               EndOfSupport = '2029-07-31'; ExtendedEnd = '2032-07-31'; Note = '' }
-        @{ Match = 'Oracle Linux\D*\b9(\.\d+)?\b';           Label = 'Oracle Linux 9';               EndOfSupport = '2032-06-30'; ExtendedEnd = '2035-06-30'; Note = '' }
-        @{ Match = 'CentOS\D*\b[4-6](\.\d+)?\b';             Label = 'CentOS 6 or older';            EndOfSupport = '2020-11-30'; ExtendedEnd = '';           Note = '' }
-        @{ Match = 'CentOS\D*\b7(\.\d+)?\b';                 Label = 'CentOS 7';                     EndOfSupport = '2024-06-30'; ExtendedEnd = '';           Note = '' }
-        @{ Match = 'CentOS\D*\b8(\.\d+)?\b';                 Label = 'CentOS 8';                     EndOfSupport = '2021-12-31'; ExtendedEnd = '';           Note = '' }
-        @{ Match = 'Debian\D*\b([4-9]|10)(\.\d+)?\b';        Label = 'Debian 10 or older';           EndOfSupport = '2024-06-30'; ExtendedEnd = '';           Note = '' }
-        @{ Match = 'Debian\D*\b11(\.\d+)?\b';                Label = 'Debian 11';                    EndOfSupport = '2026-08-31'; ExtendedEnd = '';           Note = 'LTS ended Aug 2026' }
-        @{ Match = 'Debian\D*\b12(\.\d+)?\b';                Label = 'Debian 12';                    EndOfSupport = '2028-06-30'; ExtendedEnd = '';           Note = '' }
-        @{ Match = 'Debian\D*\b13(\.\d+)?\b';                Label = 'Debian 13';                    EndOfSupport = '2030-06-30'; ExtendedEnd = '';           Note = '' }
-        @{ Match = 'Ubuntu\D*(1[0-6]\.\d+)';                 Label = 'Ubuntu 16.04 or older';        EndOfSupport = '2021-04-30'; ExtendedEnd = '';           Note = '' }
-        @{ Match = 'Ubuntu\D*18\.04';                        Label = 'Ubuntu 18.04 LTS';             EndOfSupport = '2023-05-31'; ExtendedEnd = '2028-05-30'; Note = 'Ubuntu Pro ESM required' }
-        @{ Match = 'Ubuntu\D*20\.04';                        Label = 'Ubuntu 20.04 LTS';             EndOfSupport = '2025-05-31'; ExtendedEnd = '2030-05-30'; Note = 'Ubuntu Pro ESM required' }
-        @{ Match = 'Ubuntu\D*22\.04';                        Label = 'Ubuntu 22.04 LTS';             EndOfSupport = '2027-04-30'; ExtendedEnd = '2032-05-30'; Note = '' }
-        @{ Match = 'Ubuntu\D*24\.04';                        Label = 'Ubuntu 24.04 LTS';             EndOfSupport = '2029-04-30'; ExtendedEnd = '2034-05-30'; Note = '' }
+        @{ Match = '(Red Hat Enterprise Linux|RHEL)\D*\b[2-5](\.\d+)?\b'; Label = 'RHEL 5 or older'; EndOfSupport = '2017-03-31'; ExtendedEnd = '2020-11-30'; Live = 'rhel:5'; Note = '' }
+        @{ Match = '(Red Hat Enterprise Linux|RHEL)\D*\b6(\.\d+)?\b';    Label = 'RHEL 6';          EndOfSupport = '2020-11-30'; ExtendedEnd = '2024-06-30'; Live = 'rhel:6'; Note = 'ELS ended Jun 2024' }
+        @{ Match = '(Red Hat Enterprise Linux|RHEL)\D*\b7(\.\d+)?\b';    Label = 'RHEL 7';          EndOfSupport = '2024-06-30'; ExtendedEnd = '2028-06-30'; Live = 'rhel:7'; Note = 'ELS add-on required' }
+        @{ Match = '(Red Hat Enterprise Linux|RHEL)\D*\b8(\.\d+)?\b';    Label = 'RHEL 8';          EndOfSupport = '2029-05-31'; ExtendedEnd = '2032-05-31'; Live = 'rhel:8'; Note = '' }
+        @{ Match = '(Red Hat Enterprise Linux|RHEL)\D*\b9(\.\d+)?\b';    Label = 'RHEL 9';          EndOfSupport = '2032-05-31'; ExtendedEnd = '2035-05-31'; Live = 'rhel:9'; Note = '' }
+        @{ Match = '(Red Hat Enterprise Linux|RHEL)\D*\b10(\.\d+)?\b';   Label = 'RHEL 10';         EndOfSupport = '2035-05-31'; ExtendedEnd = '2038-05-31'; Live = 'rhel:10'; Note = '' }
+        @{ Match = 'Oracle Linux\D*\b[4-6](\.\d+)?\b';       Label = 'Oracle Linux 6 or older';      EndOfSupport = '2021-03-01'; ExtendedEnd = '2024-12-31'; Live = 'oracle-linux:6'; Note = '' }
+        @{ Match = 'Oracle Linux\D*\b7(\.\d+)?\b';           Label = 'Oracle Linux 7';               EndOfSupport = '2024-12-31'; ExtendedEnd = '2028-06-30'; Live = 'oracle-linux:7'; Note = 'Extended support required' }
+        @{ Match = 'Oracle Linux\D*\b8(\.\d+)?\b';           Label = 'Oracle Linux 8';               EndOfSupport = '2029-07-31'; ExtendedEnd = '2032-07-31'; Live = 'oracle-linux:8'; Note = '' }
+        @{ Match = 'Oracle Linux\D*\b9(\.\d+)?\b';           Label = 'Oracle Linux 9';               EndOfSupport = '2032-06-30'; ExtendedEnd = '2035-06-30'; Live = 'oracle-linux:9'; Note = '' }
+        @{ Match = 'CentOS\D*\b[4-6](\.\d+)?\b';             Label = 'CentOS 6 or older';            EndOfSupport = '2020-11-30'; ExtendedEnd = '';           Live = 'centos:6'; Note = '' }
+        @{ Match = 'CentOS\D*\b7(\.\d+)?\b';                 Label = 'CentOS 7';                     EndOfSupport = '2024-06-30'; ExtendedEnd = '';           Live = 'centos:7'; Note = '' }
+        @{ Match = 'CentOS\D*\b8(\.\d+)?\b';                 Label = 'CentOS 8';                     EndOfSupport = '2021-12-31'; ExtendedEnd = '';           Live = 'centos:8'; Note = '' }
+        @{ Match = 'Debian\D*\b([4-9]|10)(\.\d+)?\b';        Label = 'Debian 10 or older';           EndOfSupport = '2024-06-30'; ExtendedEnd = '';           Live = 'debian:10'; LiveEndField = 'eoes'; Note = '' }
+        @{ Match = 'Debian\D*\b11(\.\d+)?\b';                Label = 'Debian 11';                    EndOfSupport = '2026-08-31'; ExtendedEnd = '';           Live = 'debian:11'; LiveEndField = 'eoes'; Note = 'LTS ended Aug 2026' }
+        @{ Match = 'Debian\D*\b12(\.\d+)?\b';                Label = 'Debian 12';                    EndOfSupport = '2028-06-30'; ExtendedEnd = '';           Live = 'debian:12'; LiveEndField = 'eoes'; Note = '' }
+        @{ Match = 'Debian\D*\b13(\.\d+)?\b';                Label = 'Debian 13';                    EndOfSupport = '2030-06-30'; ExtendedEnd = '';           Live = 'debian:13'; LiveEndField = 'eoes'; Note = '' }
+        @{ Match = 'Ubuntu\D*(1[0-6]\.\d+)';                 Label = 'Ubuntu 16.04 or older';        EndOfSupport = '2021-04-30'; ExtendedEnd = '';           Live = 'ubuntu:16.04'; Note = '' }
+        @{ Match = 'Ubuntu\D*18\.04';                        Label = 'Ubuntu 18.04 LTS';             EndOfSupport = '2023-05-31'; ExtendedEnd = '2028-05-30'; Live = 'ubuntu:18.04'; Note = 'Ubuntu Pro ESM required' }
+        @{ Match = 'Ubuntu\D*20\.04';                        Label = 'Ubuntu 20.04 LTS';             EndOfSupport = '2025-05-31'; ExtendedEnd = '2030-05-30'; Live = 'ubuntu:20.04'; Note = 'Ubuntu Pro ESM required' }
+        @{ Match = 'Ubuntu\D*22\.04';                        Label = 'Ubuntu 22.04 LTS';             EndOfSupport = '2027-04-30'; ExtendedEnd = '2032-05-30'; Live = 'ubuntu:22.04'; Note = '' }
+        @{ Match = 'Ubuntu\D*24\.04';                        Label = 'Ubuntu 24.04 LTS';             EndOfSupport = '2029-04-30'; ExtendedEnd = '2034-05-30'; Live = 'ubuntu:24.04'; Note = '' }
         @{ Match = '(SUSE Linux Enterprise|SLES)\D*\b(9|10|11)\b'; Label = 'SLES 11 or older';       EndOfSupport = '2022-03-31'; ExtendedEnd = '';           Note = '' }
-        @{ Match = '(SUSE Linux Enterprise|SLES)\D*\b12\b';  Label = 'SLES 12';                      EndOfSupport = '2024-10-31'; ExtendedEnd = '2027-10-31'; Note = 'LTSS required' }
+        @{ Match = '(SUSE Linux Enterprise|SLES)\D*\b12\b';  Label = 'SLES 12';                      EndOfSupport = '2024-10-31'; ExtendedEnd = '2027-10-31'; Live = 'sles:12.5'; Note = 'LTSS required' }
         @{ Match = '(SUSE Linux Enterprise|SLES)\D*\b15\b';  Label = 'SLES 15';                      EndOfSupport = '2031-07-31'; ExtendedEnd = '';           Note = '' }
-        @{ Match = 'Rocky\D*\b8\b';                          Label = 'Rocky Linux 8';                EndOfSupport = '2029-05-31'; ExtendedEnd = '';           Note = '' }
-        @{ Match = 'Rocky\D*\b9\b';                          Label = 'Rocky Linux 9';                EndOfSupport = '2032-05-31'; ExtendedEnd = '';           Note = '' }
+        @{ Match = 'Rocky\D*\b8\b';                          Label = 'Rocky Linux 8';                EndOfSupport = '2029-05-31'; ExtendedEnd = '';           Live = 'rocky-linux:8'; Note = '' }
+        @{ Match = 'Rocky\D*\b9\b';                          Label = 'Rocky Linux 9';                EndOfSupport = '2032-05-31'; ExtendedEnd = '';           Live = 'rocky-linux:9'; Note = '' }
     )
 
     #---------------------------------------------------------------------------------------------
