@@ -937,3 +937,137 @@ function New-DataSourceRows {
     & $add 'VM Import OS list and disk limits used by the rules' 'settings file (AWS publishes no API for these)' 'Static' '' 'VmImportSupportedOs, VmImportUnsupportedOs, MaxEbsVolumeGiB, ManifestImportGiB, MaxVolumesPerImport, Allow32BitImport - review when the VM Import page changes.'
     return $rows.ToArray()
 }
+
+#---------------------------------------------------------------------
+# LIVE DATE IMPACT - which VMs got a different result because a support date differs from the settings file
+#---------------------------------------------------------------------
+function Copy-OsLifecycleRows {
+    # Copy of the OsLifecycle rows as typed in the settings file, taken BEFORE live dates are applied
+    param([Parameter(Mandatory)] [hashtable]$Settings)
+    $copy = @()
+    foreach ($r in @($Settings.OsLifecycle)) {
+        if ($r -is [hashtable]) { $copy += , ($r.Clone()) }
+        else { $h = @{}; foreach ($p in $r.PSObject.Properties) { $h[$p.Name] = $p.Value }; $copy += , $h }
+    }
+    return , $copy
+}
+
+function Format-ImpactDate {
+    # 'yyyy-MM-dd' -> '31 Dec 2027'; '' -> 'none'
+    param([string]$Value)
+    if ([string]::IsNullOrWhiteSpace($Value)) { return 'none' }
+    $d = [datetime]::MinValue
+    if ([datetime]::TryParseExact($Value.Trim(), 'yyyy-MM-dd', [System.Globalization.CultureInfo]::InvariantCulture, [System.Globalization.DateTimeStyles]::None, [ref]$d)) {
+        return $d.ToString('d MMM yyyy', [System.Globalization.CultureInfo]::InvariantCulture)
+    }
+    return $Value
+}
+
+function Get-ImpactDatePosition {
+    # Where a support end date sits against the two lines the rules use: the run date and the cut-off
+    param([string]$Value, [datetime]$AsOf, [string]$Cutoff)
+    if ([string]::IsNullOrWhiteSpace($Value)) { return 'no date' }
+    $d = [datetime]::MinValue
+    if (-not [datetime]::TryParseExact($Value.Trim(), 'yyyy-MM-dd', [System.Globalization.CultureInfo]::InvariantCulture, [System.Globalization.DateTimeStyles]::None, [ref]$d)) { return 'no date' }
+    if ($d -lt $AsOf.Date) { return 'already passed' }
+    $c = [datetime]::MinValue
+    if (-not [string]::IsNullOrWhiteSpace($Cutoff) -and
+        [datetime]::TryParseExact($Cutoff.Trim(), 'yyyy-MM-dd', [System.Globalization.CultureInfo]::InvariantCulture, [System.Globalization.DateTimeStyles]::None, [ref]$c) -and $d -lt $c) {
+        return 'before the cut-off'
+    }
+    return 'after the cut-off'
+}
+
+function Compare-LiveDateImpact {
+    <#
+        Compares the strategy rows of this run (support dates from live data / cache / snapshot) with the same rows worked
+        out with the dates typed in the settings file. Returns one row per VM and OS field whose OS status, strategy, rule,
+        AWS target or readiness differs - i.e. the VMs whose result was changed by a newer support date.
+        Rows are matched by position (both runs use the same inventory in the same order), never by name, so duplicate
+        VM names cannot be mixed up. Exact-version picks in the workbook use the picked version's own dates and are not covered.
+    #>
+    param(
+        [Parameter(Mandatory)] $UsedRowsByField,        # ordered hashtable: 'VMwareTools' / 'ConfigFile' -> rows of this run
+        [Parameter(Mandatory)] $SettingsRowsByField,    # same, worked out with the settings-file dates
+        [string]$DefaultOSField = 'VMwareTools',
+        [datetime]$AsOf = (Get-Date),
+        [string]$Cutoff = ''
+    )
+    $label = @{ VMwareTools = 'VMware Tools'; ConfigFile = 'Configuration file' }
+    $out = New-Object System.Collections.Generic.List[object]
+    foreach ($field in @('VMwareTools', 'ConfigFile')) {
+        if (-not $UsedRowsByField.Contains($field) -or -not $SettingsRowsByField.Contains($field)) { continue }
+        $used = @($UsedRowsByField[$field]); $base = @($SettingsRowsByField[$field])
+        if ($used.Count -ne $base.Count) {
+            Write-Warning "Live date impact check skipped for $($label[$field]): the two runs have a different number of VMs."
+            continue
+        }
+        for ($i = 0; $i -lt $used.Count; $i++) {
+            $u = $used[$i]; $b = $base[$i]
+            if ([string]$u.VMName -ne [string]$b.VMName) {
+                Write-Warning "Live date impact check skipped for $($label[$field]): VM order differs between the two runs."
+                break
+            }
+            $differs = $false
+            foreach ($col in @('OS_Status', 'Migration_Strategy', 'Rule_Applied', 'AWS_Target', 'Readiness')) {
+                if ([string]$u.$col -ne [string]$b.$col) { $differs = $true; break }
+            }
+            if (-not $differs) { continue }
+
+            $endB = [string]$b.OS_EndOfSupport; $endU = [string]$u.OS_EndOfSupport
+            $extB = if ($b.PSObject.Properties['OS_Extended_Support_End']) { [string]$b.OS_Extended_Support_End } else { '' }
+            $extU = if ($u.PSObject.Properties['OS_Extended_Support_End']) { [string]$u.OS_Extended_Support_End } else { '' }
+            $why = @()
+            if ($endB -ne $endU) {
+                $pb = Get-ImpactDatePosition -Value $endB -AsOf $AsOf -Cutoff $Cutoff
+                $pu = Get-ImpactDatePosition -Value $endU -AsOf $AsOf -Cutoff $Cutoff
+                $t = "Support end changed from $(Format-ImpactDate $endB) to $(Format-ImpactDate $endU)"
+                if ($pb -ne $pu) { $t += " (was $pb, now $pu" + $(if ($Cutoff) { "; cut-off $(Format-ImpactDate $Cutoff))" } else { ')' }) }
+                $why += $t
+            }
+            if ($extB -ne $extU) { $why += "Paid extended support end changed from $(Format-ImpactDate $extB) to $(Format-ImpactDate $extU)" }
+            if ($why.Count -eq 0) { $why += 'The OS lifecycle row changed (label or note) - compare OS_Status' }
+            $strategyChanged = ([string]$u.Migration_Strategy -ne [string]$b.Migration_Strategy)
+
+            $out.Add([pscustomobject][ordered]@{
+                VMName                       = [string]$u.VMName
+                OS_Field                     = $label[$field]
+                Default_OS_Field             = $(if ($field -eq $DefaultOSField) { 'Yes' } else { 'No' })
+                OS                           = [string]$u.OS_Used
+                Strategy_Changed             = $(if ($strategyChanged) { 'Yes' } else { 'No - status / target / readiness only' })
+                Strategy_With_Settings_Dates = ("{0} ({1})" -f $b.Migration_Strategy, $b.Rule_Applied)
+                Strategy_Now                 = ("{0} ({1})" -f $u.Migration_Strategy, $u.Rule_Applied)
+                Support_End                  = ("{0} -> {1}" -f (Format-ImpactDate $endB), (Format-ImpactDate $endU))
+                Extended_Support_End         = ("{0} -> {1}" -f (Format-ImpactDate $extB), (Format-ImpactDate $extU))
+                OS_Status                    = ("{0} -> {1}" -f $b.OS_Status, $u.OS_Status)
+                AWS_Target                   = $(if ([string]$u.AWS_Target -ne [string]$b.AWS_Target) { "{0} -> {1}" -f $b.AWS_Target, $u.AWS_Target } else { "unchanged: $($u.AWS_Target)" })
+                Readiness                    = $(if ([string]$u.Readiness -ne [string]$b.Readiness) { "{0} -> {1}" -f $b.Readiness, $u.Readiness } else { "unchanged: $($u.Readiness)" })
+                Why                          = ($why -join '; ')
+            })
+        }
+    }
+    return $out.ToArray()
+}
+
+function New-LiveDateImpactSourceRow {
+    # One Data_Sources row summarising the live date impact check
+    param([object[]]$ImpactRows = @(), [int]$DatesChanged = 0, [string]$DefaultOSField = 'VMwareTools', [switch]$Skipped)
+    $label = @{ VMwareTools = 'VMware Tools'; ConfigFile = 'Configuration file' }
+    $rows = @($ImpactRows | Where-Object { $null -ne $_ })
+    $def = @($rows | Where-Object { $_.Default_OS_Field -eq 'Yes' })
+    $defStrat = @($def | Where-Object { $_.Strategy_Changed -eq 'Yes' })
+    if ($Skipped) { $status = 'Not checked'; $detail = 'The comparison could not be made - see the console warnings.' }
+    elseif ($DatesChanged -eq 0) { $status = 'No change'; $detail = 'No support date differs from the settings file, so no VM result can differ.' }
+    elseif ($rows.Count -eq 0) { $status = 'No VM changed'; $detail = "$DatesChanged support date(s) differ from the settings file, but no VM's OS status, strategy, target or readiness changed." }
+    else {
+        $status = "$($def.Count) VM(s) changed"
+        $detail = ("With the default OS field ({0}): {1} VM(s) changed, {2} of them changed strategy. Including the other OS field: {3} row(s). Every VM is listed on sheet Live_Date_Changes." -f $label[$DefaultOSField], $def.Count, $defStrat.Count, $rows.Count)
+    }
+    return [pscustomobject]@{
+        Area        = 'Live dates - effect on the results'
+        Source      = 'this run compared with the dates typed in the settings file'
+        Status      = $status
+        RetrievedAt = (Get-Date).ToString('yyyy-MM-dd HH:mm', [System.Globalization.CultureInfo]::InvariantCulture)
+        Detail      = $detail
+    }
+}

@@ -25,6 +25,8 @@ It is wired into the existing AWS tool (`Map_On-Prem_to_AWS.ps1`).
 
 Every run writes the sheet **Data_Sources**: one row per source with its status (Live / Cache / Snapshot / Settings file), when it was read, which settings rows got live dates and which kept the settings-file dates. An unreachable host is detected after the first failed request, so a blocked network costs seconds, not minutes.
 
+**Which VMs a newer date changed (sheet Live_Date_Changes):** every run also works out the strategy with the dates typed in the settings file and compares. Each VM (and OS field) whose OS status, strategy, rule, AWS target or readiness differs gets a row: strategy with the settings-file dates and now, support end before → after, and the reason in plain words (e.g. *Support end changed from 9 Jan 2029 to 30 Jun 2027 (was after the cut-off, now before the cut-off)*). `Strategy_Changed = Yes` marks real strategy changes; desktops, vendor products and databases are decided before the date rule, so only their status changes. The sheet is written only when something changed; Data_Sources always has a summary row (*No change* / *No VM changed* / *N VM(s) changed*) and the console lists the first 10. A date that moves but stays on the same side of the run date and the cut-off changes no result and is not listed. VMs with an exact version picked in the workbook use that version's own dates.
+
 **VM Import page workflow:** the first run prints the page hash on Data_Sources. After you have reviewed settings sections 7–8 against the page, paste that hash into `LiveData.VmImportDocKnownHash`; later runs then say *Unchanged* or *Changed – review*.
 
 ### Exact OS version chooser
@@ -54,7 +56,7 @@ Every run writes the sheet **Data_Sources**: one row per source with its status 
 | Downloads | Pricing downloads go to a temporary file first; a failed download keeps the older cached copy |
 | Settings (`SettingsVersion = '3.0'`) | New optional blocks `LiveData` and `VersionChoices`; OsLifecycle rows can carry `Live = '<product>:<cycle>'`, `LiveAlt = '<alternatives>|...'` and `LiveEndField`. All optional: an older settings file still loads (the chooser and live dates are then off) |
 | Date corrections | Windows 10 22H2: commercial ESU (paid) to Oct 2028, consumer ESU ended 13 Oct 2026; Windows 10 Enterprise LTSB 2015 added; Ubuntu ESM ends set to 30 April (verify); Windows Server 2008 keeps its "outside Azure" date (no live key) |
-| Tests | `Tests\Test-LiveData.ps1`: 116 offline checks (parsers, fallback chain, cut-off, Graviton, NIC, AMI patterns, Data_Sources). Exit code = number of failures |
+| Tests | `Tests\Test-LiveData.ps1`: 126 offline checks (parsers, fallback chain, cut-off, Graviton, NIC, AMI patterns, Data_Sources). Exit code = number of failures |
 | Requirement | ImportExcel 7 (uses `Export-Excel -NoNumberConversion`, so VM names such as `0012` or `=x` stay text) |
 
 ## Version 2.2
@@ -148,6 +150,7 @@ The output is saved next to the input as `AWS_Mapping_Output_<site>.xlsx` unless
 | Strategy_Versions | Hidden (v3.0): the result of every exact-version option per VM and OS field, read by Migration_Strategy |
 | Strategy_Rules | The rules in the order they run, in plain words, with live VM counts |
 | Data_Sources | v3.0: where every live value came from (live API / cache / snapshot / settings file) and any warning |
+| Live_Date_Changes | v3.0, only when needed: the VMs whose result changed because a live support date differs from the settings file (before / after / why) |
 
 The **Parameter_Map** and **Strategy_Settings** tabs are no longer written, and the **Parameter_Map_Ref** column has been removed from Migration_Strategy (and the hidden sheets); Rule_Applied shows which rule decided each VM. Because Strategy_Settings is gone, the settings values (patterns, thresholds, dates, targets) are no longer exposed to the client in the workbook: they stay in `Config\AWSMigrationStrategySettings.psd1`.
 

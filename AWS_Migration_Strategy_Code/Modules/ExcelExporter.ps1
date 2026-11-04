@@ -7,9 +7,13 @@ function Write-WrappedSheet {
         [string]$OutputPath,
         [string]$WorksheetName,
         [int[]]$Widths,
-        [int]$CentreColumns = 0
+        [int]$CentreColumns = 0,
+        # Columns written as text (no number conversion), e.g. VMName
+        [string[]]$TextColumns = @()
     )
-    $pkg = $Rows | Export-Excel -Path $OutputPath -WorksheetName $WorksheetName -TableStyle Medium9 -FreezeTopRow -BoldTopRow -PassThru
+    $xl = @{ Path = $OutputPath; WorksheetName = $WorksheetName; TableStyle = 'Medium9'; FreezeTopRow = $true; BoldTopRow = $true; PassThru = $true }
+    if (@($TextColumns).Count -gt 0) { $xl['NoNumberConversion'] = $TextColumns }
+    $pkg = $Rows | Export-Excel @xl
     $ws  = $pkg.Workbook.Worksheets[$WorksheetName]
     $lastRow = $ws.Dimension.End.Row
     $lastCol = $ws.Dimension.End.Column
@@ -48,10 +52,13 @@ function Export-MigrationReport {
         # Optional: Import-WorkbookChoices output (previous workbook) - pre-fills Exact_OS_Version and OS_Field_To_Use
         [hashtable]$PriorChoices = @{},
         # Optional: rows @{ Area; Source; Status; RetrievedAt; Detail } for sheet Data_Sources (where each value came from)
-        [array]$DataSources = @()
+        [array]$DataSources = @(),
+        # Optional: Compare-LiveDateImpact output - VMs whose result changed because a support date differs from the settings file
+        [array]$LiveDateChanges = @()
     )
 
     Write-Host "Writing output to $OutputPath ..." -ForegroundColor Cyan
+    $LiveDateChanges  = @($LiveDateChanges  | Where-Object { $null -ne $_ })
     # optional v3.0 inputs: $null (e.g. a feature that returned nothing) is the same as not given
     $VersionCatalog   = @($VersionCatalog   | Where-Object { $null -ne $_ })
     $VersionScenarios = @($VersionScenarios | Where-Object { $null -ne $_ })
@@ -125,6 +132,7 @@ function Export-MigrationReport {
         [PSCustomObject]@{ Column = "Hidden columns (Migration_Strategy)"; 'Value / Pattern' = "VM_Index, Version_Family_Tools, Version_Family_Config, Version_List, Version_Lookup_Row"; Meaning = "Helper columns of the live formulas - do not change them. Every result is looked up by VM_Index, so sorting and filtering Migration_Strategy is safe." }
         [PSCustomObject]@{ Column = "OS_Extended_Support_End (Migration_Strategy)"; 'Value / Pattern' = "<date> or blank"; Meaning = "End of the paid extended support (Microsoft ESU, Red Hat ELS, SUSE LTSS, Ubuntu Pro) when the vendor offers one; blank = none or not published." }
         [PSCustomObject]@{ Column = "OS_EndOfSupport / OS_Extended_Support_End (Migration_Strategy)"; 'Value / Pattern' = "yyyy-MM-dd"; Meaning = "Support dates from the live lifecycle data when available (endoflife.date), else the cached copy, the snapshot shipped with the tool or the settings file - see sheet Data_Sources." }
+        [PSCustomObject]@{ Column = "Sheet Live_Date_Changes"; 'Value / Pattern' = "one row per VM and OS field"; Meaning = "Only written when a newer support date changed a VM's result: the VM's OS status, strategy, AWS target or readiness with the dates typed in the settings file, and now. Strategy_Changed = Yes when the strategy itself changed. A VM with an exact OS version picked uses that version's own dates instead." }
         [PSCustomObject]@{ Column = "Recommended_Volume (Disk_Inventory)"; 'Value / Pattern' = "gp3 (VM-aggregated - verify thin/thick & IOPS needs per volume manually)"; Meaning = "Sizing is now a per-VM aggregate, so individual disk thin/thick-provisioning status is no longer available; a generic gp3 recommendation is given and per-volume detail must be verified manually if needed." }
     )
 
@@ -261,6 +269,12 @@ function Export-MigrationReport {
         # Where every live value came from (live API / cache / snapshot / settings file) and any warning
         $dsRows = @($DataSources | Select-Object Area, Source, Status, RetrievedAt, Detail)
         Write-WrappedSheet -Rows $dsRows -OutputPath $OutputPath -WorksheetName 'Data_Sources' -Widths @(26, 40, 16, 18, 100) -CentreColumns 0
+    }
+    if (@($LiveDateChanges).Count -gt 0) {
+        # One row per VM and OS field whose result differs from the result with the settings-file dates (only written when there is one)
+        $ldRows = @($LiveDateChanges | Select-Object VMName, OS_Field, Default_OS_Field, OS, Strategy_Changed, Strategy_With_Settings_Dates, Strategy_Now,
+                                                     Support_End, Extended_Support_End, OS_Status, AWS_Target, Readiness, Why)
+        Write-WrappedSheet -Rows $ldRows -OutputPath $OutputPath -WorksheetName 'Live_Date_Changes' -Widths @(28, 16, 10, 32, 16, 26, 26, 28, 28, 40, 40, 34, 70) -CentreColumns 0 -TextColumns @('VMName')
     }
 
     if ($StrategyRows.Count -gt 0) {
@@ -461,7 +475,8 @@ function Set-StrategyWorkbookFormulas {
     }
     # ---------- VM names starting with '=' (Export-Excel writes them as formulas): back to plain text ----------
     foreach ($pair in @(@('Migration_Strategy', 'VMName'), @('Strategy_VMwareTools', 'VMName'), @('Strategy_ConfigFile', 'VMName'),
-                        @('Strategy_Versions', 'VMName'), @('VM_Inventory', 'VMName'), @('Disk_Inventory', 'VM_Name'))) {
+                        @('Strategy_Versions', 'VMName'), @('VM_Inventory', 'VMName'), @('Disk_Inventory', 'VM_Name'),
+                        @('Live_Date_Changes', 'VMName'))) {
         $ws = $wb.Worksheets[$pair[0]]
         if ($null -eq $ws -or $null -eq $ws.Dimension) { continue }
         $nc = 0; for ($c = 1; $c -le $ws.Dimension.End.Column; $c++) { if ($ws.Cells[1, $c].Text -eq $pair[1]) { $nc = $c; break } }

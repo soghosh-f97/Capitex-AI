@@ -271,6 +271,29 @@ Check 'settings: Windows 10/11 hide releases ended > 36 months ago' (@($vc | Whe
 Check 'settings: OsTemplate keeps bitness {1}' (@($vc | Where-Object { [string]$_.OsTemplate -notlike '*{1}*' }).Count -eq 0)
 Check 'settings: TimeoutSec 20' ([int]$s.LiveData.TimeoutSec -eq 20)
 
+Write-Host "15. Live date impact (sheet Live_Date_Changes)"
+$mk = { param($vm, $st, $rule, $end, $status) [pscustomobject]@{ VMName = $vm; OS_Used = 'Microsoft Windows Server 2019 (64-bit)'; OS_Status = $status; Migration_Strategy = $st; Rule_Applied = $rule; AWS_Target = 'Amazon EC2'; Readiness = 'Ready'; OS_EndOfSupport = $end; OS_Extended_Support_End = '' } }
+$asOf = [datetime]'2026-11-04'
+$base = [ordered]@{ VMwareTools = @((& $mk 'a' 'Rehost' 'R09' '2029-01-09' 'Supported'), (& $mk 'dup' 'Rehost' 'R09' '2029-01-09' 'Supported'), (& $mk 'dup' 'Rehost' 'R09' '2031-10-14' 'Supported')); ConfigFile = @() }
+$used = [ordered]@{ VMwareTools = @((& $mk 'a' 'Replatform' 'R06' '2027-06-30' 'Supported - ends before cut-off'), (& $mk 'dup' 'Rehost' 'R09' '2029-01-09' 'Supported'), (& $mk 'dup' 'Rehost' 'R09' '2031-12-31' 'Supported')); ConfigFile = @() }
+$imp = @(Compare-LiveDateImpact -UsedRowsByField $used -SettingsRowsByField $base -DefaultOSField 'VMwareTools' -AsOf $asOf -Cutoff '2027-12-31')
+Check 'impact: only the VM whose result changed is listed' ($imp.Count -eq 1 -and $imp[0].VMName -eq 'a') ($imp | Out-String)
+Check 'impact: strategy before / after' ($imp[0].Strategy_With_Settings_Dates -eq 'Rehost (R09)' -and $imp[0].Strategy_Now -eq 'Replatform (R06)')
+Check 'impact: reason names the cut-off crossing' ($imp[0].Why -like '*9 Jan 2029 to 30 Jun 2027*after the cut-off, now before the cut-off*') $imp[0].Why
+Check 'impact: date moved but same side of the cut-off is not listed (duplicate names matched by position)' (@($imp | Where-Object { $_.VMName -eq 'dup' }).Count -eq 0)
+$short = [ordered]@{ VMwareTools = @($used.VMwareTools[0]); ConfigFile = @() }
+$imp2 = @(Compare-LiveDateImpact -UsedRowsByField $short -SettingsRowsByField $base -AsOf $asOf -Cutoff '2027-12-31' -WarningAction SilentlyContinue)
+Check 'impact: different VM counts -> skipped, nothing guessed' ($imp2.Count -eq 0)
+$sr = New-LiveDateImpactSourceRow -ImpactRows $imp -DatesChanged 1 -DefaultOSField 'VMwareTools'
+Check 'impact: Data_Sources row counts VMs and strategy changes' ($sr.Status -eq '1 VM(s) changed' -and $sr.Detail -like '*1 of them changed strategy*') $sr.Detail
+Check 'impact: no date change -> No change' ((New-LiveDateImpactSourceRow -ImpactRows @() -DatesChanged 0).Status -eq 'No change')
+Check 'impact: dates changed but no VM -> No VM changed' ((New-LiveDateImpactSourceRow -ImpactRows @() -DatesChanged 3).Status -eq 'No VM changed')
+Check 'impact: date positions' ((Get-ImpactDatePosition '2026-01-01' $asOf '2027-12-31') -eq 'already passed' -and (Get-ImpactDatePosition '2027-06-30' $asOf '2027-12-31') -eq 'before the cut-off' -and (Get-ImpactDatePosition '2029-01-09' $asOf '2027-12-31') -eq 'after the cut-off' -and (Get-ImpactDatePosition '' $asOf '2027-12-31') -eq 'no date')
+$sCopy = @{ OsLifecycle = @(@{ Label = 'X'; EndOfSupport = '2029-01-09' }) }
+$copy = Copy-OsLifecycleRows -Settings $sCopy
+$sCopy.OsLifecycle[0].EndOfSupport = '2027-06-30'
+Check 'impact: settings-date copy is independent of the live update' ($copy[0].EndOfSupport -eq '2029-01-09' -and @($copy).Count -eq 1)
+
 Remove-Item -Recurse -Force $tmp
 Write-Host ("{0} passed, {1} failed" -f $script:pass, $script:fail) -ForegroundColor $(if ($script:fail) { 'Red' } else { 'Green' })
 exit $script:fail

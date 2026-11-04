@@ -91,6 +91,8 @@ $StrategyAsOf     = Get-Date   # one date for every lifecycle check in this run 
 Write-Host "=== Live data ===" -ForegroundColor Cyan
 $LiveCacheDir     = Get-LiveCacheRoot
 $LifecycleCatalog = Get-LifecycleCatalog -Settings $StrategySettings -Offline:$Offline -CacheDir $LiveCacheDir
+# Keep the dates exactly as typed in the settings file, so the run can show which VMs a newer date changed (sheet Live_Date_Changes)
+$OsLifecycleFromSettings = Copy-OsLifecycleRows -Settings $StrategySettings
 $LifecycleChanges = @(Update-OsLifecycleFromCatalog -Settings $StrategySettings -Catalog $LifecycleCatalog)
 foreach ($p in ($LifecycleCatalog.Products.Keys | Sort-Object)) {
     Write-Host ("  OS support dates {0,-15}: {1} ({2})" -f $p, $LifecycleCatalog.Source[$p], $LifecycleCatalog.RetrievedAt[$p])
@@ -208,6 +210,44 @@ foreach ($field in @('VMwareTools', 'ConfigFile')) {
 }
 $StrategyRows      = $StrategyRowsByField[$OSFieldDefault]
 Write-Host "Default OS field: $OSFieldDefault (the client can switch it in the workbook)"
+
+#---------------------------------------------------------------------
+# LIVE DATE IMPACT: the same rules with the dates typed in the settings file; every VM whose OS status, strategy,
+# target or readiness differs is listed on sheet Live_Date_Changes (and summarised on Data_Sources)
+#---------------------------------------------------------------------
+$LiveDateChanges = @()
+$liveImpactSkipped = $false
+if ($dateChanges.Count -gt 0) {
+    try {
+        $settingsDatesOnly = $StrategySettings.Clone()            # shallow copy: only OsLifecycle is replaced
+        $settingsDatesOnly.OsLifecycle = $OsLifecycleFromSettings
+        $settingsRowsByField = [ordered]@{}
+        foreach ($field in @('VMwareTools', 'ConfigFile')) {
+            $settingsRowsByField[$field] = @(Get-MigrationStrategyRows -StrategyInventory $StrategyInventory -Settings $settingsDatesOnly -OSField $field -PreferRelocateForLegacyOS:$PreferRelocateForLegacyOS -AsOf $StrategyAsOf)
+        }
+        $LiveDateChanges = @(Compare-LiveDateImpact -UsedRowsByField $StrategyRowsByField -SettingsRowsByField $settingsRowsByField `
+            -DefaultOSField $OSFieldDefault -AsOf $StrategyAsOf -Cutoff ([string]$StrategySettings.SupportCutoffDate))
+    }
+    catch {
+        $liveImpactSkipped = $true
+        Write-Warning "Could not compare the results with the settings-file dates: $($_.Exception.Message)"
+    }
+}
+$liveDefault = @($LiveDateChanges | Where-Object { $_.Default_OS_Field -eq 'Yes' })
+if ($dateChanges.Count -eq 0) {
+    Write-Host "Live date effect: no support date differs from the settings file - no VM result changed by live data"
+}
+elseif ($liveDefault.Count -eq 0 -and -not $liveImpactSkipped) {
+    Write-Host ("Live date effect: {0} support date(s) differ from the settings file, but no VM result changed (OS field {1})" -f $dateChanges.Count, $OSFieldDefault)
+}
+elseif (-not $liveImpactSkipped) {
+    $liveStrat = @($liveDefault | Where-Object { $_.Strategy_Changed -eq 'Yes' })
+    Write-Host ("Live date effect: {0} VM(s) changed because a support date differs from the settings file ({1} changed strategy) - sheet Live_Date_Changes" -f $liveDefault.Count, $liveStrat.Count) -ForegroundColor Yellow
+    foreach ($c in @($liveDefault | Select-Object -First 10)) {
+        Write-Host ("  {0}: {1} -> {2}  ({3})" -f $c.VMName, $c.Strategy_With_Settings_Dates, $c.Strategy_Now, $c.Why) -ForegroundColor Yellow
+    }
+    if ($liveDefault.Count -gt 10) { Write-Host ("  ... and {0} more" -f ($liveDefault.Count - 10)) -ForegroundColor Yellow }
+}
 # Template count: shown as the static VM count of rule R01 on the Strategy_Rules sheet
 $templateCount     = @($vInfo | Where-Object { Test-RVToolsTrue (Get-RowValue $_ 'Template') $StrategySettings.TemplateValuePattern }).Count
 # The Parameter_Map and Strategy_Settings sheets are no longer written to the workbook
@@ -244,6 +284,7 @@ foreach ($pf in @(@{ Region = 'us-east-1'; Path = $csvPathUS }, @{ Region = 'eu-
 $DataSources = @(New-DataSourceRows -LifecycleCatalog $LifecycleCatalog -LifecycleChanges $LifecycleChanges -VmImportCheck $VmImportCheck `
     -AwsFacts $AwsLiveFacts -PricingFiles $pricingInfo -CutoffSetting $CutoffSetting -CutoffResolved ([string]$StrategySettings.SupportCutoffDate) `
     -ArmTypesExcluded ([int]$USIndex.ArmInstanceTypeCount) -Settings $StrategySettings)
+$DataSources += New-LiveDateImpactSourceRow -ImpactRows $LiveDateChanges -DatesChanged $dateChanges.Count -DefaultOSField $OSFieldDefault -Skipped:$liveImpactSkipped
 
 # The new workbook parameters are passed only when the exporter supports them (keeps this script usable with older modules)
 $exportArgs = @{
@@ -257,7 +298,7 @@ $exportArgs = @{
     RuleCatalog         = $RuleCatalog
 }
 $exportParams = (Get-Command Export-MigrationReport).Parameters
-$optionalExport = @{ VersionCatalog = $VersionCatalog; VersionScenarios = $VersionScenarios; PriorChoices = $PriorChoices; DataSources = $DataSources }
+$optionalExport = @{ VersionCatalog = $VersionCatalog; VersionScenarios = $VersionScenarios; PriorChoices = $PriorChoices; DataSources = $DataSources; LiveDateChanges = $LiveDateChanges }
 foreach ($k in $optionalExport.Keys) {
     if ($exportParams.ContainsKey($k)) { $exportArgs[$k] = $optionalExport[$k] }
     elseif ($k -eq 'DataSources') { Write-Warning "This exporter has no Data_Sources sheet - the data sources are listed below instead." }
