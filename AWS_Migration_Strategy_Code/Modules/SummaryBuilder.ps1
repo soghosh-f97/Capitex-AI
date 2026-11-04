@@ -50,7 +50,7 @@ function Build-SummaryReport {
         $strategyMetrics += [PSCustomObject]@{ Metric = "VMs - Powered off, strategy to be reviewed with the client (rule R13)"; Value = (@($StrategyRows | Where-Object { $_.Rule_Applied -eq 'R13' })).Count }
         if ($VersionScenarioRows.Count -gt 0) {
             # the exporter turns this into a live count of 'Not checked yet' cells in column Exact_OS_Version
-            $waiting = @($VersionScenarioRows | ForEach-Object { $_.VMName } | Sort-Object -Unique).Count
+            $waiting = @($VersionScenarioRows | ForEach-Object { if ($_.PSObject.Properties['VM_Index']) { [string]$_.VM_Index } else { [string]$_.VMName } } | Sort-Object -Unique).Count
             $strategyMetrics += [PSCustomObject]@{ Metric = "VMs - Exact OS version not checked yet (sheet OS_Versions)"; Value = $waiting }
         }
 

@@ -129,19 +129,26 @@ function Get-MigrationStrategyDefaults {
         if (-not $vc.ContainsKey('Help')) { $vc['Help'] = 'Check the exact version inside the VM (winver)' }
     }
 
-    # SupportCutoffDate: 'yyyy-MM-dd', or 'today+<n>m' (= run date + n months; resolved once, here)
+    # SupportCutoffDate: 'yyyy-MM-dd', 'today+<n>m' or 'today+<n>y' (relative to the run date; resolved once, here).
+    # The text as typed is kept in SupportCutoffSetting (shown on Data_Sources); SupportCutoffDate becomes the date used.
     $cutoffRaw = ([string]$settings.SupportCutoffDate).Trim()
     $settings['SupportCutoffSetting'] = $cutoffRaw
-    if ($cutoffRaw -match '^today\s*\+\s*(\d+)\s*m$') {
-        $months = [int]$Matches[1]
-        $resolved = $null
-        if (Get-Command Resolve-SupportCutoffDate -ErrorAction SilentlyContinue) { $resolved = Resolve-SupportCutoffDate -Value $cutoffRaw -AsOf (Get-Date) }
-        if ([string]::IsNullOrWhiteSpace([string]$resolved)) { $resolved = (Get-Date).Date.AddMonths($months).ToString('yyyy-MM-dd', [System.Globalization.CultureInfo]::InvariantCulture) }
-        $settings['SupportCutoffDate'] = [string]$resolved
+    $resolved = $null
+    if (Get-Command Resolve-SupportCutoffDate -ErrorAction SilentlyContinue) {
+        try { $resolved = Resolve-SupportCutoffDate -Value $cutoffRaw -AsOf (Get-Date) }
+        catch { $resolved = $null }
     }
-    elseif ($null -eq (ConvertTo-StrategyDate $cutoffRaw)) {
-        Write-Warning "Setting SupportCutoffDate '$cutoffRaw' is neither yyyy-MM-dd nor today+<n>m - the 'ends before cut-off' check is skipped."
+    else {
+        $inv = [System.Globalization.CultureInfo]::InvariantCulture
+        if ($null -ne (ConvertTo-StrategyDate $cutoffRaw)) { $resolved = (ConvertTo-StrategyDate $cutoffRaw).ToString('yyyy-MM-dd', $inv) }
+        elseif ($cutoffRaw -match '^(?i)today\s*\+\s*(\d+)\s*m$') { $resolved = (Get-Date).Date.AddMonths([int]$Matches[1]).ToString('yyyy-MM-dd', $inv) }
+        elseif ($cutoffRaw -match '^(?i)today\s*\+\s*(\d+)\s*y$') { $resolved = (Get-Date).Date.AddYears([int]$Matches[1]).ToString('yyyy-MM-dd', $inv) }
+        elseif ($cutoffRaw -match '^(?i)today$') { $resolved = (Get-Date).Date.ToString('yyyy-MM-dd', $inv) }
     }
+    if ([string]::IsNullOrWhiteSpace([string]$resolved)) {
+        Write-Warning "Setting SupportCutoffDate '$cutoffRaw' is not valid (use yyyy-MM-dd, today+<n>m or today+<n>y) - the 'ends before cut-off' check of R06 is skipped."
+    }
+    else { $settings['SupportCutoffDate'] = [string]$resolved }
 
     $settings['SettingsPath'] = $SettingsPath
     return $settings
@@ -899,13 +906,32 @@ function Get-VersionChoiceCatalog {
             continue
         }
         $srcText = Get-LifecycleSourceText -Catalog $LifecycleCatalog -Product $vc.Product
+        # Optional HideEndedBefore ('yyyy-MM-dd' or 'today-<n>m' / 'today-<n>y'; '' = keep all): drop releases whose support
+        # AND paid extended support both ended before that date (releases with no published end date are kept)
+        $hideBefore = $null
+        $hideText = if ($vc.ContainsKey('HideEndedBefore')) { ([string]$vc.HideEndedBefore).Trim() } else { '' }
+        if ($hideText) {
+            if ($null -ne (ConvertTo-StrategyDate $hideText)) { $hideBefore = ConvertTo-StrategyDate $hideText }
+            elseif ($hideText -match '^(?i)today\s*-\s*(\d+)\s*m$') { $hideBefore = $AsOf.Date.AddMonths(-[int]$Matches[1]) }
+            elseif ($hideText -match '^(?i)today\s*-\s*(\d+)\s*y$') { $hideBefore = $AsOf.Date.AddYears(-[int]$Matches[1]) }
+            else { Write-Warning "VersionChoices '$($vc.Family)': HideEndedBefore '$hideText' is not valid (use yyyy-MM-dd, today-<n>m or today-<n>y) - all versions are listed." }
+        }
         $seen = @{}
         $opts = foreach ($rel in $releases) {
             $cycle = [string](Get-CatalogValue $rel 'Cycle')
             $info  = Get-VersionOptionInfo -Product $vc.Product -Cycle $cycle -Label ([string](Get-CatalogValue $rel 'Label'))
             if ($seen.ContainsKey($info.Text)) { continue }
+            if ($null -ne $hideBefore) {
+                $eosD = ConvertTo-StrategyDate (ConvertTo-LifecycleDateText (Get-CatalogValue $rel 'EndOfSupport'))
+                $extD = ConvertTo-StrategyDate (ConvertTo-LifecycleDateText (Get-CatalogValue $rel 'ExtendedEnd'))
+                $lastD = $eosD; if ($null -ne $extD -and ($null -eq $lastD -or $extD -gt $lastD)) { $lastD = $extD }
+                if ($null -ne $eosD -and $lastD -lt $hideBefore) { continue }
+            }
             $seen[$info.Text] = $true
-            $osString = if ($vc.OsTemplate -match '\{0\}') { $vc.OsTemplate -f $info.Version } else { [string]$vc.OsTemplate }
+            # OsTemplate: {0} = version, optional {1} = '(32-bit)' / '(64-bit)' taken from each VM's own OS string. '{1}' is kept
+            # in OsString here and filled per VM by Get-VersionScenarioRows; '(64-bit)' is used for the option's status below.
+            $osString = if ($vc.OsTemplate -match '\{[01]\}') { ([string]$vc.OsTemplate).Replace('{0}', [string]$info.Version) } else { [string]$vc.OsTemplate }
+            $osString64 = $osString.Replace('{1}', '(64-bit)')
             $lc = @{
                 Label        = $info.Text
                 EndOfSupport = ConvertTo-LifecycleDateText (Get-CatalogValue $rel 'EndOfSupport')
@@ -913,7 +939,7 @@ function Get-VersionChoiceCatalog {
                 Note         = ''
                 DateSource   = $srcText
             }
-            $status = (Get-AWSOSLifecycle -OSString $osString -Settings $Settings -AsOf $AsOf -LifecycleOverride $lc).Status
+            $status = (Get-AWSOSLifecycle -OSString $osString64 -Settings $Settings -AsOf $AsOf -LifecycleOverride $lc).Status
             [pscustomobject][ordered]@{
                 Option        = $info.Text
                 OsString      = $osString
@@ -928,6 +954,15 @@ function Get-VersionChoiceCatalog {
             }
         }
         $opts = @($opts | Sort-Object @{ Expression = { $_.SortKey }; Descending = $true }, Option)
+        if ($opts.Count -eq 0) {
+            Write-Warning "Exact-version chooser: every '$($vc.Family)' version is hidden by HideEndedBefore - those VMs keep the RVTools label and get no dropdown."
+            continue
+        }
+        $maxOptions = 25
+        if ($opts.Count -gt $maxOptions) {
+            Write-Warning ("Exact-version chooser: '{0}' has {1} versions - only the {2} newest are listed (set HideEndedBefore to choose which)." -f $vc.Family, $opts.Count, $maxOptions)
+            $opts = @($opts | Select-Object -First $maxOptions)
+        }
         $out.Add([pscustomobject][ordered]@{ Family = $vc.Family; Match = $vc.Match; Help = $vc.Help; Product = $vc.Product; Source = $srcText; Options = $opts })
     }
     return @($out.ToArray())
@@ -960,7 +995,9 @@ function Get-VersionScenarioRows {
         one row per VM x OS field x option, for VMs whose OS in that field (no override) matches a VersionChoices family
         that has options in -VersionCatalog. The rules run with OS = the option's OsString and the option's support dates
         (OS_Source = 'Client choice (workbook)'). Rows have the Get-MigrationStrategyRows columns plus ScenarioKey
-        ('<VMName>|<VMware Tools|Configuration file>|<Option>') and the plain-language Version_Note.
+        ('<VM_Index>|<VMware Tools|Configuration file>|<Option>'), VM_Index (1-based position of the VM in -StrategyInventory,
+        = its row on the Strategy_* sheets minus 1 - VM names can repeat or contain wildcard characters, the index cannot),
+        Scenario_Field, Scenario_Option and the plain-language Version_Note.
     #>
     param(
         [Parameter(Mandatory)] [AllowEmptyCollection()] [array]$StrategyInventory,
@@ -977,8 +1014,9 @@ function Get-VersionScenarioRows {
         $fs = Get-SettingsForOSField -Settings $Settings -OSField $field
         $eligible = New-Object System.Collections.Generic.List[object]   # original VMs
         $copies   = New-Object System.Collections.Generic.List[object]
-        $meta     = New-Object System.Collections.Generic.List[object]   # @{ BaseIndex; Option }
-        foreach ($vm in $StrategyInventory) {
+        $meta     = New-Object System.Collections.Generic.List[object]   # @{ BaseIndex; Option; VmIndex }
+        for ($vi = 0; $vi -lt $StrategyInventory.Count; $vi++) {
+            $vm = $StrategyInventory[$vi]
             $osUsed = ''; $osSource = ''
             foreach ($src in $fs.OsSourcePrecedence) {
                 $t = switch ($src) { 'Override' { $vm.OSOverride } 'VMwareTools' { $vm.OSTools } 'ConfigFile' { $vm.OSConfig } default { '' } }
@@ -989,11 +1027,19 @@ function Get-VersionScenarioRows {
             if ($null -eq $vc -or -not $byFamily.ContainsKey($vc.Family)) { continue }
             $baseIndex = $eligible.Count
             $eligible.Add($vm)
+            # keep the VM's own bitness: a 32-bit 'Windows 10' stays 32-bit whatever release is picked
+            $is32 = Test-AnyPattern $osUsed $Settings.Arch32BitPatterns
+            $bits = if ($is32) { '(32-bit)' } else { '(64-bit)' }
             foreach ($opt in @($byFamily[$vc.Family].Options)) {
+                $os = [string]$opt.OsString
+                if ($os.Contains('{1}')) { $os = $os.Replace('{1}', $bits) }
+                elseif ($is32 -and -not (Test-AnyPattern $os $Settings.Arch32BitPatterns)) {
+                    $os = if ($os -match '\(64-bit\)') { $os -replace '\(64-bit\)', '(32-bit)' } else { "$os (32-bit)" }
+                }
                 $copy = $vm.PSObject.Copy()
-                $copy | Add-Member -NotePropertyName VersionChoice -NotePropertyValue ([pscustomobject]@{ OsString = $opt.OsString; Lifecycle = $opt.Lifecycle; Option = $opt.Option }) -Force
+                $copy | Add-Member -NotePropertyName VersionChoice -NotePropertyValue ([pscustomobject]@{ OsString = $os; Lifecycle = $opt.Lifecycle; Option = $opt.Option }) -Force
                 $copies.Add($copy)
-                $meta.Add(@{ BaseIndex = $baseIndex; Option = $opt })
+                $meta.Add(@{ BaseIndex = $baseIndex; Option = $opt; VmIndex = ($vi + 1) })
             }
         }
         if ($copies.Count -eq 0) { continue }
@@ -1001,7 +1047,12 @@ function Get-VersionScenarioRows {
         $rows     = @(Get-MigrationStrategyRows -StrategyInventory $copies.ToArray() -Settings $Settings -OSField $field -PreferRelocateForLegacyOS:$PreferRelocateForLegacyOS -AsOf $AsOf)
         for ($i = 0; $i -lt $rows.Count; $i++) {
             $row = $rows[$i]; $m = $meta[$i]; $base = $baseRows[$m.BaseIndex]
-            $o = [ordered]@{ ScenarioKey = "$($row.VMName)|$($fieldLabel[$field])|$($m.Option.Option)" }
+            $o = [ordered]@{
+                ScenarioKey     = "$($m.VmIndex)|$($fieldLabel[$field])|$($m.Option.Option)"
+                VM_Index        = [int]$m.VmIndex
+                Scenario_Field  = $fieldLabel[$field]
+                Scenario_Option = [string]$m.Option.Option
+            }
             foreach ($p in $row.PSObject.Properties) { $o[$p.Name] = $p.Value }
             $o['Version_Note'] = Get-VersionChangeNote -Base $base -Row $row -Option $m.Option -Settings $Settings -AsOf $AsOf
             $all.Add([pscustomobject]$o)
@@ -1013,19 +1064,31 @@ function Get-VersionScenarioRows {
 function Import-WorkbookChoices {
     <#
         Reads the client's choices from a previous output workbook (sheet Migration_Strategy), so a re-run keeps them:
-        returns @{ '<vm name, lower case>' = @{ OSField = <OS_Field_To_Use>; ExactVersion = <Exact_OS_Version> } }.
-        Values are validated by the exporter (an option that no longer exists is dropped with a warning).
+        returns @{ '<vm name, exact text>' = @{ OSField = <OS_Field_To_Use>; ExactVersion = <Exact_OS_Version> } } (keys are
+        case-sensitive). A name that appears more than once in the previous workbook is skipped with a warning - the tool
+        cannot tell which row was which VM. Values are validated by the exporter (an option that no longer exists is dropped
+        with a warning).
     #>
     param([Parameter(Mandatory)] [string]$Path)
+    $out = New-Object System.Collections.Hashtable ([System.StringComparer]::Ordinal)
     if (-not (Test-Path -LiteralPath $Path)) { throw "Previous workbook not found: $Path" }
     $rows = @()
     try { $rows = @(Import-Excel -Path $Path -WorksheetName 'Migration_Strategy') }
-    catch { Write-Warning "Could not read sheet Migration_Strategy from '$Path' - previous choices are not reused: $($_.Exception.Message)"; return @{} }
-    $out = @{}
+    catch { Write-Warning "Could not read sheet Migration_Strategy from '$Path' - previous choices are not reused: $($_.Exception.Message)"; return $out }
+    $seen = New-Object System.Collections.Hashtable ([System.StringComparer]::Ordinal)
     foreach ($r in $rows) {
-        $name = Get-RowValue $r 'VMName'
-        if (-not $name) { continue }
-        $out[$name.ToLower()] = @{ OSField = (Get-RowValue $r 'OS_Field_To_Use'); ExactVersion = (Get-RowValue $r 'Exact_OS_Version') }
+        $p = $r.PSObject.Properties['VMName']
+        if ($null -eq $p -or $null -eq $p.Value) { continue }
+        $name = [string]$p.Value
+        if ([string]::IsNullOrWhiteSpace($name)) { continue }
+        if ($seen.ContainsKey($name)) { $seen[$name]++ } else { $seen[$name] = 1 }
+        $field = [string](Get-RowValue $r 'OS_Field_To_Use'); $exact = [string](Get-RowValue $r 'Exact_OS_Version')
+        $out[$name] = @{ OSField = $field.Trim(); ExactVersion = $exact.Trim() }
+    }
+    $dupes = @($seen.Keys | Where-Object { $seen[$_] -gt 1 })
+    foreach ($d in $dupes) { [void]$out.Remove($d) }
+    if ($dupes.Count -gt 0) {
+        Write-Warning ("{0} VM name(s) appear more than once in '{1}' - their previous choices are not reused: {2}" -f $dupes.Count, (Split-Path $Path -Leaf), (($dupes | Select-Object -First 10) -join ', '))
     }
     Write-Host ("Reused choices from {0}: {1} VM row(s)" -f (Split-Path $Path -Leaf), $out.Count) -ForegroundColor Green
     return $out

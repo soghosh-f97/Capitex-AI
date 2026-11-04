@@ -62,6 +62,11 @@ if (-not (Get-Module -ListAvailable -Name ImportExcel)) {
     Install-Module -Name ImportExcel -Scope CurrentUser -Force
 }
 Import-Module ImportExcel -ErrorAction Stop
+# v3.0 writes VM names as text (Export-Excel -NoNumberConversion): an old ImportExcel lacks it - stop before any slow work
+if (-not (Get-Command Export-Excel).Parameters.ContainsKey('NoNumberConversion')) {
+    Write-Error ("ImportExcel {0} is too old for this tool - run: Update-Module ImportExcel (version 7 or later), then start a new PowerShell window." -f (Get-Module ImportExcel).Version)
+    exit 1
+}
 Add-Type -AssemblyName Microsoft.VisualBasic
 
 if (-not (Test-Path $InputExcelPath)) { Write-Error "Input file not found: $InputExcelPath"; exit 1 }
