@@ -8,6 +8,19 @@ This follows the Azure team's `Migration_Strategy_Generator.ps1` pattern:
 
 It is wired into the existing AWS tool (`Map_On-Prem_to_AWS.ps1`).
 
+## Version 3.0
+
+| Change | Detail |
+|---|---|
+| Exact OS version chooser | RVTools shows only a family label for some Windows VMs: "Windows 10", "Windows 11", "Windows Server 2012" (used for both 2012 and 2012 R2) and "Windows Server 2016 or later". These VMs now get a yellow dropdown in the new column **Exact_OS_Version** on Migration_Strategy (e.g. *Windows 10 22H2 - all editions*, *Windows 11 24H2 - Enterprise / Education*, *Windows Server 2012 R2*, *Windows Server 2019*). Picking a version updates that VM's **support dates, OS status, strategy, rule, AWS target, readiness, actions and notes** live, and the counts on Strategy_Rules / Summary_Metrics follow. *Not checked yet* = the RVTools label is used (today's result). Example: "2016 or later" → *Windows Server 2016* changes Rehost (R09) to Replatform (R06), because 2016 support ends 12 Jan 2027, before the cut-off |
+| How it works | The engine pre-computes every option (`Get-VersionScenarioRows`: one row per VM × OS field × option, hidden sheet **Strategy_Versions**); each result column of Migration_Strategy looks up `<VM>|<OS field>|<version>` there and falls back to the normal result. The options and their dates come from the lifecycle data (`Get-VersionChoiceCatalog`), so new Windows releases appear automatically |
+| New sheet OS_Versions | Plain-language *What to do* box (3 steps: find the yellow cells, run `winver` / `(Get-ComputerInfo).OsName` inside the VM, pick the version), a live count of VMs still waiting for a choice, and one table per family with every version, its support end, paid extended support end, status today and the source of the dates. These tables are the dropdown lists |
+| New columns | **Exact_OS_Version** (dropdown), **OS_Extended_Support_End** (ESU / ELS / LTSS end) and **Version_Note** (what to check, or what the chosen version changed and why) |
+| Choices survive a re-run | `-ReuseChoicesFrom <previous output.xlsx>` (`Import-WorkbookChoices`) pre-fills Exact_OS_Version and OS_Field_To_Use; a choice that is no longer an option is reset with a warning |
+| Settings | New optional blocks `VersionChoices` (section 6b: which RVTools labels get a dropdown, which lifecycle product / releases feed it, the OS text the rules use) and `LiveData`; OsLifecycle rows can carry `Live = '<product>:<cycle>'`. `SupportCutoffDate` also accepts `today+<n>m`. All optional: an old settings file still loads (the chooser is then off) |
+| Data_Sources sheet | Where each live value came from (live API, cache, shipped snapshot or settings file) and any warning |
+| Summary_Metrics | New live count "VMs - Exact OS version not checked yet"; strategy / readiness values that only a version choice can produce also get a row |
+
 ## Version 2.2
 
 | Change | Detail |
@@ -49,10 +62,10 @@ Status is against the original AWS team code.
 | File | Status | What it does |
 |---|---|---|
 | `Map_On-Prem_to_AWS.ps1` | modified (v2.2) | Orchestration. Parameters `-StrategySettingsPath`, `-OSOverridePath`, `-PreferRelocateForLegacyOS`, `-SiteName` (used in the output file name), **`-OSFieldDefault`**. Reads vInfo and vDisk. |
-| `Modules\MigrationStrategyGenerator.ps1` | new (v1), modified (v2.2) | Decision engine (R01–R13) and the rule catalogue. `Get-ParameterMapRows` and the catalogue's settings table are kept for other tooling but are not written to the workbook. |
-| `Config\AWSMigrationStrategySettings.psd1` | new (v1), modified (v2.2) | Every pattern, threshold, date, vendor, database engine and target label. No values are hard-coded in the engine. |
-| `Modules\SummaryBuilder.ps1` | modified (v2.2) | Counts by strategy and readiness (live formulas in the workbook), EC2 cost for Rehost / Replatform VMs. |
-| `Modules\ExcelExporter.ps1` | modified (v2.2) | Writes the sheets (see *Workbook tabs*), the OS_Choice switch and the live formulas. |
+| `Modules\MigrationStrategyGenerator.ps1` | new (v1), modified (v3.0) | Decision engine (R01–R13), the rule catalogue and (v3.0) the exact-version chooser: `Get-VersionChoiceCatalog`, `Get-VersionScenarioRows`, `Import-WorkbookChoices`. `Get-ParameterMapRows` and the catalogue's settings table are kept for other tooling but are not written to the workbook. |
+| `Config\AWSMigrationStrategySettings.psd1` | new (v1), modified (v3.0) | Every pattern, threshold, date, vendor, database engine and target label; (v3.0) `VersionChoices`, `LiveData`. No values are hard-coded in the engine. |
+| `Modules\SummaryBuilder.ps1` | modified (v3.0) | Counts by strategy and readiness (live formulas in the workbook), EC2 cost for Rehost / Replatform VMs, VMs waiting for an exact-version choice. |
+| `Modules\ExcelExporter.ps1` | modified (v3.0) | Writes the sheets (see *Workbook tabs*), the OS_Choice switch, the Exact_OS_Version dropdowns, OS_Versions / Data_Sources and the live formulas. |
 | `Modules\InstanceSizing.ps1` | bug fix (v1) | `$isWindows` renamed to `$isWindowsPricing`: under PowerShell 7 the old name clashes with the read-only `$IsWindows` |
 | `Modules\OSMapping.ps1`, `PricingIndex.ps1`, `VMProcessor.ps1`, `DiskProcessor.ps1` | unchanged | EC2 / EBS sizing and pricing |
 
@@ -68,6 +81,10 @@ Files are saved as UTF-8 with BOM, so they work on Windows PowerShell 5.1 and on
 .\Map_On-Prem_to_AWS.ps1 -InputExcelPath ... -OSOverridePath .\os_checks.csv
 # send VMs whose OS is past ALL support to Relocate (VMware on AWS / EVS) instead of Replatform
 .\Map_On-Prem_to_AWS.ps1 -InputExcelPath ... -PreferRelocateForLegacyOS
+# v3.0: keep the client's choices (Exact_OS_Version, OS_Field_To_Use) from the previous workbook
+.\Map_On-Prem_to_AWS.ps1 -InputExcelPath ... -ReuseChoicesFrom .\AWS_Mapping_Output_DE-HUB_reviewed.xlsx
+# v3.0: no internet calls (lifecycle dates from the cache / the snapshot shipped with the tool)
+.\Map_On-Prem_to_AWS.ps1 -InputExcelPath ... -Offline
 ```
 
 The output is saved next to the input as `AWS_Mapping_Output_<site>.xlsx` unless `-OutputExcelPath` is given (`<site>` = `-SiteName`, else taken from the input file name).
@@ -81,9 +98,12 @@ The output is saved next to the input as `AWS_Mapping_Output_<site>.xlsx` unless
 | Summary_Metrics | Totals; strategy / readiness counts are live formulas |
 | Legend | Meaning of the columns and values |
 | OS_Choice | Dropdown (cell C4): OS field for all VMs |
-| Migration_Strategy | One row per VM; column OS_Field_To_Use switches one VM; every result column is a live formula |
+| OS_Versions | v3.0: how to pick the exact Windows version (3 steps), live count of VMs still to check, every version with its dates (the dropdown lists) |
+| Migration_Strategy | One row per VM; column OS_Field_To_Use switches one VM; column Exact_OS_Version (yellow) sets the exact OS version; every result column is a live formula |
 | Strategy_VMwareTools, Strategy_ConfigFile | Hidden: the results for each OS field, read by Migration_Strategy |
+| Strategy_Versions | Hidden (v3.0): the result of every exact-version option per VM and OS field, read by Migration_Strategy |
 | Strategy_Rules | The rules in the order they run, in plain words, with live VM counts |
+| Data_Sources | v3.0: where every live value came from (live API / cache / snapshot / settings file) and any warning |
 
 The **Parameter_Map** and **Strategy_Settings** tabs are no longer written, and the **Parameter_Map_Ref** column has been removed from Migration_Strategy (and the hidden sheets); Rule_Applied shows which rule decided each VM. Because Strategy_Settings is gone, the settings values (patterns, thresholds, dates, targets) are no longer exposed to the client in the workbook: they stay in `Config\AWSMigrationStrategySettings.psd1`.
 

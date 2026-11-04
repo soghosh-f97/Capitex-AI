@@ -21,6 +21,8 @@
       R12 DMZ server                                            #25
       --- Final check ---
       R13 Powered off               -> Client Review            #2
+    EXACT OS VERSION (3.0): VersionChoices (section 6b) lets the client pick the exact Windows version per VM in the
+      workbook (column Exact_OS_Version, sheet OS_Versions); the rules above are then re-evaluated for that version.
     Removed in 2.0: decommission notes, plant floor, domain controllers (rows 6, 7, 8, 12 removed earlier),
     infrastructure services (#16) and ISO connected (#24). Anti-affinity (#30) is a design note.
 #>
@@ -169,6 +171,23 @@
         @{ Match = '(SUSE Linux Enterprise|SLES)\D*\b15\b';  Label = 'SLES 15';                      EndOfSupport = '2031-07-31'; ExtendedEnd = '';           Note = '' }
         @{ Match = 'Rocky\D*\b8\b';                          Label = 'Rocky Linux 8';                EndOfSupport = '2029-05-31'; ExtendedEnd = '';           Note = '' }
         @{ Match = 'Rocky\D*\b9\b';                          Label = 'Rocky Linux 9';                EndOfSupport = '2032-05-31'; ExtendedEnd = '';           Note = '' }
+    )
+
+    #---------------------------------------------------------------------------------------------
+    # 6b. EXACT OS VERSION CHOOSER (workbook column Exact_OS_Version, sheet OS_Versions)
+    #     RVTools shows only a family label for some Windows VMs ('Windows 10', 'Windows 11', 'Windows Server 2012' for both
+    #     2012 and 2012 R2, 'Windows Server 2016 or later'). For a VM whose OS (field in use, no override) matches Match, the
+    #     client picks the exact version from a dropdown and the dates, OS status, strategy, target and readiness update live.
+    #     The options and their dates come from the lifecycle data (Product = endoflife.date product; CyclePattern selects
+    #     its releases), so new versions appear automatically. OsTemplate = the OS text the rules are evaluated with for an
+    #     option ({0} = the version, e.g. '2012 R2', '2019'). First match wins: keep '2016 or later' above other Server rows.
+    #---------------------------------------------------------------------------------------------
+    # [R03/R06/R09] Families the client can refine to an exact version (first match wins).
+    VersionChoices = @(
+        @{ Match = 'Windows Server\D*2016 or later'; Family = 'Windows Server 2016 or later'; Product = 'windows-server'; CyclePattern = '^20(1[6-9]|[2-9]\d)$'; OsTemplate = 'Microsoft Windows Server {0} (64-bit)'; Help = 'Inside the VM run winver, or in PowerShell: (Get-ComputerInfo).OsName - it shows e.g. "Windows Server 2019 Standard"' }
+        @{ Match = 'Windows Server\D*2012';          Family = 'Windows Server 2012 / 2012 R2'; Product = 'windows-server'; CyclePattern = '^2012(-r2)?$';         OsTemplate = 'Microsoft Windows Server {0} (64-bit)'; Help = 'Inside the VM run winver, or in PowerShell: (Get-ComputerInfo).OsName - it shows "Windows Server 2012" or "Windows Server 2012 R2"' }
+        @{ Match = 'Windows 10\b';                   Family = 'Windows 10';                    Product = 'windows';        CyclePattern = '^10-';                 OsTemplate = 'Microsoft Windows 10 (64-bit)';         Help = 'Inside the VM press Win+R and run winver: it shows the version (e.g. "Version 22H2") and the edition (Pro, Enterprise, LTSC ...)' }
+        @{ Match = 'Windows 11\b';                   Family = 'Windows 11';                    Product = 'windows';        CyclePattern = '^11-';                 OsTemplate = 'Microsoft Windows 11 (64-bit)';         Help = 'Inside the VM press Win+R and run winver: it shows the version (e.g. "Version 24H2") and the edition (Pro, Enterprise, LTSC ...)' }
     )
 
     #---------------------------------------------------------------------------------------------

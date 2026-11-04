@@ -23,7 +23,12 @@
       vDisk  - VM, Capacity MiB, Raw, Sharing mode, Shared Bus         (optional tab)
     Missing tabs or columns are tolerated: the related checks simply find nothing.
 
-    RULES - numbered in the order they run (settings version 2.2):
+    EXACT OS VERSION (v3.0): for VMs whose RVTools label covers several versions (setting VersionChoices: Windows 10 / 11,
+    Windows Server 2012 / 2012 R2, Windows Server 2016 or later) Get-VersionScenarioRows pre-computes every option, so the
+    client picks the version in the workbook (column Exact_OS_Version) and every result column updates live.
+    Support dates can come from live lifecycle data (Modules\LiveDataProviders.ps1 updates OsLifecycle before the rules run).
+
+    RULES - numbered in the order they run (settings version 3.0):
       R01 Template              excluded (not a running server)                         [PM #1]
       --- Decide the strategy: first matching rule wins ---
       R02 Retire       Platform component (vCenter, 3PAR SP, SSMC / OneView, SimpliVity, vSAN witness)  [Azure R01]
@@ -98,6 +103,45 @@ function Get-MigrationStrategyDefaults {
     if ($settings.DatabaseStrategy -notin @('Replatform', 'Rehost', 'Manual Review')) { throw "Setting DatabaseStrategy must be 'Replatform', 'Rehost' or 'Manual Review'" }
     $missingTargets = @(@('Decommission', 'OnPremises', 'Ec2', 'Ec2SupportedOs', 'Ec2Os64Bit') | Where-Object { -not $settings.Targets.ContainsKey($_) })
     if ($missingTargets.Count -gt 0) { throw ("Setting Targets is missing: " + ($missingTargets -join ', ')) }
+
+    # ---------------- Optional v3.0 keys (missing = feature off) ----------------
+    # LiveData: owned by Modules\LiveDataProviders.ps1; only its shape is checked here
+    if (-not $settings.ContainsKey('LiveData')) { $settings['LiveData'] = @{ Enabled = $false } }
+    elseif ($settings.LiveData -isnot [hashtable]) { throw "Setting LiveData must be a hashtable (@{ ... })" }
+
+    # OsLifecycle rows: optional Live = '<product>:<cycle>' (endoflife.date) and DateSource (set at run time)
+    foreach ($r in $settings.OsLifecycle) {
+        if ($r.ContainsKey('Live') -and -not [string]::IsNullOrWhiteSpace([string]$r.Live) -and ([string]$r.Live -notmatch '^[a-z0-9][a-z0-9-]*:[A-Za-z0-9._-]+$')) {
+            throw "OsLifecycle row '$($r.Label)': Live must look like '<product>:<cycle>' (e.g. 'rhel:7'), not '$($r.Live)'"
+        }
+    }
+
+    # VersionChoices: families the client can refine to an exact version in the workbook
+    if (-not $settings.ContainsKey('VersionChoices') -or $null -eq $settings.VersionChoices) { $settings['VersionChoices'] = @() }
+    $settings['VersionChoices'] = @($settings.VersionChoices)
+    foreach ($vc in $settings.VersionChoices) {
+        if ($vc -isnot [hashtable]) { throw 'Setting VersionChoices must be a list of @{ Match; Family; Product; CyclePattern; OsTemplate; Help }' }
+        $vcMissing = @(@('Match', 'Family', 'Product', 'CyclePattern', 'OsTemplate') | Where-Object { [string]::IsNullOrWhiteSpace([string]$vc[$_]) })
+        if ($vcMissing.Count -gt 0) { throw ("VersionChoices entry '$($vc.Family)' is missing: " + ($vcMissing -join ', ')) }
+        foreach ($p in @('Match', 'CyclePattern')) {
+            try { [void][regex]::new([string]$vc[$p]) } catch { throw "VersionChoices entry '$($vc.Family)': $p is not a valid regular expression: $($vc[$p])" }
+        }
+        if (-not $vc.ContainsKey('Help')) { $vc['Help'] = 'Check the exact version inside the VM (winver)' }
+    }
+
+    # SupportCutoffDate: 'yyyy-MM-dd', or 'today+<n>m' (= run date + n months; resolved once, here)
+    $cutoffRaw = ([string]$settings.SupportCutoffDate).Trim()
+    $settings['SupportCutoffSetting'] = $cutoffRaw
+    if ($cutoffRaw -match '^today\s*\+\s*(\d+)\s*m$') {
+        $months = [int]$Matches[1]
+        $resolved = $null
+        if (Get-Command Resolve-SupportCutoffDate -ErrorAction SilentlyContinue) { $resolved = Resolve-SupportCutoffDate -Value $cutoffRaw -AsOf (Get-Date) }
+        if ([string]::IsNullOrWhiteSpace([string]$resolved)) { $resolved = (Get-Date).Date.AddMonths($months).ToString('yyyy-MM-dd', [System.Globalization.CultureInfo]::InvariantCulture) }
+        $settings['SupportCutoffDate'] = [string]$resolved
+    }
+    elseif ($null -eq (ConvertTo-StrategyDate $cutoffRaw)) {
+        Write-Warning "Setting SupportCutoffDate '$cutoffRaw' is neither yyyy-MM-dd nor today+<n>m - the 'ends before cut-off' check is skipped."
+    }
 
     $settings['SettingsPath'] = $SettingsPath
     return $settings
@@ -213,9 +257,12 @@ function Get-AWSOSLifecycle {
     param(
         [string]$OSString,
         [Parameter(Mandatory)] [hashtable]$Settings,
-        [datetime]$AsOf = (Get-Date)
+        [datetime]$AsOf = (Get-Date),
+        # Optional: @{ Label; EndOfSupport; ExtendedEnd; Note; DateSource } used instead of the OsLifecycle row
+        # (the exact version the client picked in the workbook)
+        [hashtable]$LifecycleOverride = $null
     )
-    $out = [ordered]@{ Status = ''; Label = ''; EndOfSupport = ''; ExtendedEnd = ''; Note = '' }
+    $out = [ordered]@{ Status = ''; Label = ''; EndOfSupport = ''; ExtendedEnd = ''; Note = ''; DateSource = '' }
 
     if ([string]::IsNullOrWhiteSpace($OSString) -or (Test-AnyPattern $OSString $Settings.UnknownOsPatterns)) {
         $out.Status = 'Verify - OS not identified'; $out.Label = 'Unknown'
@@ -228,8 +275,11 @@ function Get-AWSOSLifecycle {
     }
 
     $rule = $null
-    foreach ($r in $Settings.OsLifecycle) {
-        if ($OSString -match $r.Match) { $rule = $r; break }
+    if ($null -ne $LifecycleOverride) { $rule = $LifecycleOverride }
+    else {
+        foreach ($r in $Settings.OsLifecycle) {
+            if ($OSString -match $r.Match) { $rule = $r; break }
+        }
     }
     if ($null -eq $rule) {
         $out.Status = 'Verify - version not identified'; $out.Label = $OSString
@@ -238,6 +288,7 @@ function Get-AWSOSLifecycle {
     }
 
     $out.Label = $rule.Label; $out.EndOfSupport = [string]$rule.EndOfSupport; $out.ExtendedEnd = [string]$rule.ExtendedEnd; $out.Note = [string]$rule.Note
+    $out.DateSource = if ([string]::IsNullOrWhiteSpace([string]$rule.DateSource)) { 'settings file' } else { [string]$rule.DateSource }
     $end    = ConvertTo-StrategyDate $rule.EndOfSupport
     $ext    = ConvertTo-StrategyDate $rule.ExtendedEnd
     $cutoff = ConvertTo-StrategyDate $Settings.SupportCutoffDate
@@ -386,7 +437,16 @@ function Get-StrategyFacts {
         if (-not [string]::IsNullOrWhiteSpace($t)) { $osUsed = $t; $osSource = $src; break }
     }
 
-    $lc = Get-AWSOSLifecycle -OSString $osUsed -Settings $Settings -AsOf $AsOf
+    # Exact version picked by the client in the workbook (scenario rows of Get-VersionScenarioRows only).
+    # A guest-check override file always wins, so the choice never replaces an override.
+    $choice = if ($Vm.PSObject.Properties['VersionChoice']) { $Vm.VersionChoice } else { $null }
+    if ($null -ne $choice -and $osSource -ne 'Override') {
+        $osUsed = [string]$choice.OsString; $osSource = 'Client choice (workbook)'
+        $lc = Get-AWSOSLifecycle -OSString $osUsed -Settings $Settings -AsOf $AsOf -LifecycleOverride $choice.Lifecycle
+    }
+    else {
+        $lc = Get-AWSOSLifecycle -OSString $osUsed -Settings $Settings -AsOf $AsOf
+    }
 
     # ---------------- Config-vs-Tools mismatch (only when no override) ----------------
     $mismatch = 'None'; $mismatchNote = ''
@@ -481,6 +541,17 @@ function Get-MigrationStrategyRows {
         $osName = if ($f.Lifecycle.Label) { $f.Lifecycle.Label } else { $f.OSUsed }
         $osEnd  = [string]$f.Lifecycle.EndOfSupport
 
+        # Exact OS version: the RVTools label covers several versions with different support dates (setting VersionChoices).
+        # Scenario rows (client choice) get their note from Get-VersionScenarioRows; the exporter clears this note when the
+        # workbook has no dropdown for the VM (no lifecycle data for the family).
+        $versionNote = ''
+        if ($f.OSSource -notin @('Override', 'Client choice (workbook)')) {
+            $vcFam = Get-VersionChoiceFamily -OSString $f.OSUsed -Settings $Settings
+            if ($null -ne $vcFam) {
+                $versionNote = "Not checked yet: '$($vcFam.Family)' has versions with different support dates. $($vcFam.Help), then pick the version in column Exact_OS_Version (sheet OS_Versions explains how). Until then the RVTools label is used."
+            }
+        }
+
         # ---------------- Review flags (never change the strategy) ----------------
         if ($f.IsPoweredOff -and $Settings.PoweredOffAction -eq 'Flag') { $flags.Add("$($vm.Powerstate) - confirm the VM is still required before migrating (possible Retire)") }
         if ($f.IsStale) { $flags.Add('Name suggests a restore / backup / old copy / test VM - possible Retire') }
@@ -559,7 +630,7 @@ function Get-MigrationStrategyRows {
         }
         elseif ($f.IsLegacyOS -or $f.Is32BitUsed) {
             $rule = 'R06'; $pm = if ($f.Is32BitUsed) { 'PM #11' } else { 'PM #18, #32' }
-            $conf = if ($f.OSSource -in @('Override', 'VMwareTools') -and $f.Mismatch -eq 'None') { 'High' } else { 'Medium' }
+            $conf = if ($f.OSSource -in @('Override', 'VMwareTools', 'Client choice (workbook)') -and $f.Mismatch -eq 'None') { 'High' } else { 'Medium' }
             if ($f.Is32BitUsed) {
                 # 32-bit cannot be imported and cannot be upgraded in place to 64-bit: always rebuild
                 $strategy = 'Replatform'
@@ -604,7 +675,7 @@ function Get-MigrationStrategyRows {
         }
         elseif ($f.ImportStatus -eq 'Supported') {
             $strategy = 'Rehost'; $rule = 'R09'; $pm = 'PM #17'
-            $conf = if ($Settings.AllowHighRehostConfidence -and $f.OSSource -in @('Override', 'VMwareTools') -and $f.Mismatch -eq 'None' -and $f.OSStatus -eq 'Supported') { 'High' } else { $Settings.DefaultRehostConfidence }
+            $conf = if ($Settings.AllowHighRehostConfidence -and $f.OSSource -in @('Override', 'VMwareTools', 'Client choice (workbook)') -and $f.Mismatch -eq 'None' -and $f.OSStatus -eq 'Supported') { 'High' } else { $Settings.DefaultRehostConfidence }
             $why = "OS '$osName' is on the AWS VM Import list and '$($f.OSStatus)'; agentless image import"
             $alt = 'Refactor / Replatform only if the application owner wants modernisation'; $target = $Settings.Targets.Ec2
             if ($f.IsGroupedLabel) {
@@ -674,6 +745,8 @@ function Get-MigrationStrategyRows {
             OS_Source             = $f.OSSource
             OS_Status             = $f.OSStatus
             OS_EndOfSupport       = $osEnd
+            OS_Extended_Support_End = [string]$f.Lifecycle.ExtendedEnd
+            Version_Note          = $versionNote
             OS_Mismatch           = $f.Mismatch
             VM_Import_OS          = $f.ImportStatus
             Current_vCPU          = $vm.CurrentVCPU
@@ -698,6 +771,264 @@ function Get-MigrationStrategyRows {
         }
     }
     return @($rows)
+}
+
+#endregion
+
+#region ------------------------- Exact OS version chooser (setting VersionChoices) -------------------------
+
+function Get-VersionChoiceFamily {
+    # First VersionChoices entry whose Match fits the OS string (or $null).
+    param([string]$OSString, [Parameter(Mandatory)] [hashtable]$Settings)
+    if ([string]::IsNullOrWhiteSpace($OSString) -or -not $Settings.ContainsKey('VersionChoices')) { return $null }
+    foreach ($vc in @($Settings.VersionChoices)) {
+        if ($OSString -match $vc.Match) { return $vc }
+    }
+    return $null
+}
+
+function Get-CatalogValue {
+    # Reads a member of a hashtable or an object (the lifecycle catalog may come from JSON or from PowerShell objects).
+    param($Object, [string]$Name)
+    if ($null -eq $Object) { return $null }
+    if ($Object -is [System.Collections.IDictionary]) { if ($Object.Contains($Name)) { return $Object[$Name] } else { return $null } }
+    $p = $Object.PSObject.Properties[$Name]
+    if ($null -eq $p) { return $null }
+    return $p.Value
+}
+
+function ConvertTo-LifecycleDateText {
+    # endoflife.date values can be a date, true/false or null: keep 'yyyy-MM-dd' dates only.
+    param($Value)
+    if ($null -eq $Value) { return '' }
+    if ($Value -is [datetime]) { return $Value.ToString('yyyy-MM-dd', [System.Globalization.CultureInfo]::InvariantCulture) }
+    $t = ([string]$Value).Trim()
+    if ($t -match '^(\d{4}-\d{2}-\d{2})') { return $Matches[1] }
+    return ''
+}
+
+function Format-StrategyDateLong {
+    # 'yyyy-MM-dd' -> '12 Jan 2027' (culture-independent, for client-facing notes)
+    param([string]$Text)
+    $d = ConvertTo-StrategyDate $Text
+    if ($null -eq $d) { return $Text }
+    return $d.ToString('d MMM yyyy', [System.Globalization.CultureInfo]::InvariantCulture)
+}
+
+function Get-VersionOptionInfo {
+    <#
+        Client-facing option text and a sort key for one lifecycle release.
+          windows-server '2012-r2'     -> 'Windows Server 2012 R2'             (OS text for the rules: OsTemplate -f '2012 R2')
+          windows '11-24h2-e'          -> 'Windows 11 24H2 - Enterprise / Education'
+          windows '11-24h2-w'          -> 'Windows 11 24H2 - Home / Pro'
+          windows '10-22h2'            -> 'Windows 10 22H2 - all editions'
+          windows '10-21h2-e-lts'      -> 'Windows 10 Enterprise LTSC 2021 (21H2)'
+          windows '10-21h2-iot-lts'    -> 'Windows 10 IoT Enterprise LTSC 2021 (21H2)'
+        Unknown cycle shapes fall back to the catalog label (or the cycle name).
+    #>
+    param([string]$Product, [string]$Cycle, [string]$Label)
+    $c = ([string]$Cycle).Trim().ToLower()
+    $info = [ordered]@{ Text = ''; Version = ''; Sort = 0.0 }
+    if ($Product -eq 'windows-server') {
+        $ver = (($c -split '-') | ForEach-Object { if ($_ -match '^r\d$' -or $_ -match '^sp\d$') { $_.ToUpper() } else { $_ } }) -join ' '
+        $info.Version = $ver
+        $info.Text = "Windows Server $ver"
+        $n = 0.0; if ($c -match '^(\d{4})') { $n = [double]$Matches[1] }; if ($c -match '-r2') { $n += 0.5 }
+        $info.Sort = $n
+        return [pscustomobject]$info
+    }
+    if ($Product -eq 'windows' -and $c -match '^(10|11)-(\d{2}h\d|\d{4})(.*)$') {
+        $major = $Matches[1]; $rel = $Matches[2]; $rest = $Matches[3]
+        $relText = $rel.ToUpper()
+        $ltscYear = @{ '10-1507' = 'LTSB 2015'; '10-1607' = 'LTSB 2016'; '10-1809' = 'LTSC 2019'; '10-21h2' = 'LTSC 2021'; '11-24h2' = 'LTSC 2024' }
+        $relNum = if ($rel -match '^(\d{2})h(\d)$') { [double]("{0}.{1}" -f $Matches[1], $Matches[2]) } else { [double]$rel.Substring(0, 2) + ([double]$rel.Substring(2, 2) / 100) }
+        $sort = [double]$major * 100 + $relNum
+        if ($rest -match 'lts') {
+            $l = if ($ltscYear.ContainsKey("$major-$rel")) { $ltscYear["$major-$rel"] } else { "LTSC ($relText)" }
+            $kind = if ($rest -match 'iot') { 'IoT Enterprise' } else { 'Enterprise' }
+            $info.Text = "Windows $major $kind $l ($relText)"
+            $sort -= 0.002; if ($rest -match 'iot') { $sort -= 0.001 }
+        }
+        elseif ($rest -match '^-e\b|^-e$') { $info.Text = "Windows $major $relText - Enterprise / Education" }
+        elseif ($rest -match '^-w\b|^-w$') { $info.Text = "Windows $major $relText - Home / Pro"; $sort -= 0.0005 }
+        else { $info.Text = "Windows $major $relText - all editions" }
+        $info.Version = $relText; $info.Sort = $sort
+        return [pscustomobject]$info
+    }
+    $info.Text = if (-not [string]::IsNullOrWhiteSpace($Label)) { $(if ($Label -match '^Windows') { $Label } elseif ($Product -eq 'windows') { "Windows $Label" } else { $Label }) } else { $Cycle }
+    $info.Version = $Cycle
+    return [pscustomobject]$info
+}
+
+function Get-LifecycleSourceText {
+    # 'Live' / 'Cache' / 'StaleCache' / 'Snapshot' + retrieval time -> client-facing source text
+    param($Catalog, [string]$Product)
+    $src = [string](Get-CatalogValue (Get-CatalogValue $Catalog 'Source') $Product)
+    $at  = [string](Get-CatalogValue (Get-CatalogValue $Catalog 'RetrievedAt') $Product)
+    $when = if ($at) { " ($at)" } else { '' }
+    switch ($src) {
+        'Live'       { return "endoflife.date - live$when" }
+        'Cache'      { return "endoflife.date - cached copy$when" }
+        'StaleCache' { return "endoflife.date - cached copy, out of date$when - verify" }
+        'Snapshot'   { return 'offline snapshot shipped with the tool - verify' }
+        default      { if ($src) { return $src } else { return 'lifecycle data' } }
+    }
+}
+
+function Get-VersionChoiceCatalog {
+    <#
+        Options of the exact-version dropdown, per VersionChoices family, from the lifecycle catalog
+        (Get-LifecycleCatalog in Modules\LiveDataProviders.ps1). Families without lifecycle data are left out (warning),
+        so their VMs keep today's result and get no dropdown.
+        Returns @( [pscustomobject]@{ Family; Match; Help; Product; Options = @( [pscustomobject]@{ Option; OsString; Version;
+                   EndOfSupport; ExtendedEnd; MainstreamEnd; DateSource; Status; Lifecycle } ) } )
+    #>
+    param(
+        [Parameter(Mandatory)] [hashtable]$Settings,
+        $LifecycleCatalog = $null,
+        [datetime]$AsOf = (Get-Date)
+    )
+    $out = New-Object System.Collections.Generic.List[object]
+    if (@($Settings.VersionChoices).Count -eq 0) { return @() }
+    $products = Get-CatalogValue $LifecycleCatalog 'Products'
+    foreach ($vc in @($Settings.VersionChoices)) {
+        $releases = @(Get-CatalogValue $products $vc.Product)
+        $releases = @($releases | Where-Object { $null -ne $_ -and ([string](Get-CatalogValue $_ 'Cycle')) -match $vc.CyclePattern })
+        if ($releases.Count -eq 0) {
+            Write-Warning "Exact-version chooser: no lifecycle data for '$($vc.Family)' (product '$($vc.Product)') - those VMs keep the RVTools label and get no dropdown."
+            continue
+        }
+        $srcText = Get-LifecycleSourceText -Catalog $LifecycleCatalog -Product $vc.Product
+        $seen = @{}
+        $opts = foreach ($rel in $releases) {
+            $cycle = [string](Get-CatalogValue $rel 'Cycle')
+            $info  = Get-VersionOptionInfo -Product $vc.Product -Cycle $cycle -Label ([string](Get-CatalogValue $rel 'Label'))
+            if ($seen.ContainsKey($info.Text)) { continue }
+            $seen[$info.Text] = $true
+            $osString = if ($vc.OsTemplate -match '\{0\}') { $vc.OsTemplate -f $info.Version } else { [string]$vc.OsTemplate }
+            $lc = @{
+                Label        = $info.Text
+                EndOfSupport = ConvertTo-LifecycleDateText (Get-CatalogValue $rel 'EndOfSupport')
+                ExtendedEnd  = ConvertTo-LifecycleDateText (Get-CatalogValue $rel 'ExtendedEnd')
+                Note         = ''
+                DateSource   = $srcText
+            }
+            $status = (Get-AWSOSLifecycle -OSString $osString -Settings $Settings -AsOf $AsOf -LifecycleOverride $lc).Status
+            [pscustomobject][ordered]@{
+                Option        = $info.Text
+                OsString      = $osString
+                Version       = $info.Version
+                EndOfSupport  = $lc.EndOfSupport
+                ExtendedEnd   = $lc.ExtendedEnd
+                MainstreamEnd = ConvertTo-LifecycleDateText (Get-CatalogValue $rel 'MainstreamEnd')
+                DateSource    = $srcText
+                Status        = $status
+                Lifecycle     = $lc
+                SortKey       = $info.Sort
+            }
+        }
+        $opts = @($opts | Sort-Object @{ Expression = { $_.SortKey }; Descending = $true }, Option)
+        $out.Add([pscustomobject][ordered]@{ Family = $vc.Family; Match = $vc.Match; Help = $vc.Help; Product = $vc.Product; Source = $srcText; Options = $opts })
+    }
+    return @($out.ToArray())
+}
+
+function Get-VersionChangeNote {
+    # Plain-language note for one scenario row: what was applied and what changed against the RVTools-label result.
+    param([Parameter(Mandatory)] $Base, [Parameter(Mandatory)] $Row, [Parameter(Mandatory)] $Option, [Parameter(Mandatory)] [hashtable]$Settings, [datetime]$AsOf = (Get-Date))
+    $end = ConvertTo-StrategyDate $Option.EndOfSupport
+    $support = if ($null -eq $end) { 'support end date not published' }
+               elseif ($end -lt $AsOf) { "support ended $(Format-StrategyDateLong $Option.EndOfSupport)" }
+               else { "support ends $(Format-StrategyDateLong $Option.EndOfSupport)" }
+    if ($Option.ExtendedEnd) { $support += " (paid extended support to $(Format-StrategyDateLong $Option.ExtendedEnd))" }
+    $why = "$($Option.Option) $support"
+    if ($Row.OS_Status -eq 'Supported - ends before cut-off') { $why += ", before the cut-off $(Format-StrategyDateLong $Settings.SupportCutoffDate)" }
+    if ($Base.Migration_Strategy -ne $Row.Migration_Strategy) {
+        return "Strategy changes from $($Base.Migration_Strategy) ($($Base.Rule_Applied)) to $($Row.Migration_Strategy) ($($Row.Rule_Applied)) because $why."
+    }
+    $changes = @()
+    if ($Base.Rule_Applied -ne $Row.Rule_Applied) { $changes += "rule $($Base.Rule_Applied) -> $($Row.Rule_Applied)" }
+    if ($Base.Readiness -ne $Row.Readiness)       { $changes += "readiness $($Base.Readiness) -> $($Row.Readiness)" }
+    if ($Base.OS_Status -ne $Row.OS_Status)       { $changes += "OS status '$($Base.OS_Status)' -> '$($Row.OS_Status)'" }
+    if ($changes.Count -gt 0) { return "Applied: $why. Strategy stays $($Row.Migration_Strategy); " + ($changes -join ', ') + '.' }
+    return "Applied: $why. Strategy unchanged ($($Row.Migration_Strategy), $($Row.Rule_Applied))."
+}
+
+function Get-VersionScenarioRows {
+    <#
+        Pre-computes the result of every exact-version option, so the workbook can switch live:
+        one row per VM x OS field x option, for VMs whose OS in that field (no override) matches a VersionChoices family
+        that has options in -VersionCatalog. The rules run with OS = the option's OsString and the option's support dates
+        (OS_Source = 'Client choice (workbook)'). Rows have the Get-MigrationStrategyRows columns plus ScenarioKey
+        ('<VMName>|<VMware Tools|Configuration file>|<Option>') and the plain-language Version_Note.
+    #>
+    param(
+        [Parameter(Mandatory)] [AllowEmptyCollection()] [array]$StrategyInventory,
+        [Parameter(Mandatory)] [hashtable]$Settings,
+        [AllowEmptyCollection()] [array]$VersionCatalog = @(),
+        [switch]$PreferRelocateForLegacyOS,
+        [datetime]$AsOf = (Get-Date)
+    )
+    $byFamily = @{}; foreach ($fam in @($VersionCatalog)) { if ($null -ne $fam -and @($fam.Options).Count -gt 0) { $byFamily[$fam.Family] = $fam } }
+    if ($byFamily.Count -eq 0 -or $StrategyInventory.Count -eq 0) { return @() }
+    $fieldLabel = @{ VMwareTools = 'VMware Tools'; ConfigFile = 'Configuration file' }
+    $all = New-Object System.Collections.Generic.List[object]
+    foreach ($field in @('VMwareTools', 'ConfigFile')) {
+        $fs = Get-SettingsForOSField -Settings $Settings -OSField $field
+        $eligible = New-Object System.Collections.Generic.List[object]   # original VMs
+        $copies   = New-Object System.Collections.Generic.List[object]
+        $meta     = New-Object System.Collections.Generic.List[object]   # @{ BaseIndex; Option }
+        foreach ($vm in $StrategyInventory) {
+            $osUsed = ''; $osSource = ''
+            foreach ($src in $fs.OsSourcePrecedence) {
+                $t = switch ($src) { 'Override' { $vm.OSOverride } 'VMwareTools' { $vm.OSTools } 'ConfigFile' { $vm.OSConfig } default { '' } }
+                if (-not [string]::IsNullOrWhiteSpace($t)) { $osUsed = $t; $osSource = $src; break }
+            }
+            if ($osSource -eq 'Override' -or [string]::IsNullOrWhiteSpace($osUsed)) { continue }
+            $vc = Get-VersionChoiceFamily -OSString $osUsed -Settings $Settings
+            if ($null -eq $vc -or -not $byFamily.ContainsKey($vc.Family)) { continue }
+            $baseIndex = $eligible.Count
+            $eligible.Add($vm)
+            foreach ($opt in @($byFamily[$vc.Family].Options)) {
+                $copy = $vm.PSObject.Copy()
+                $copy | Add-Member -NotePropertyName VersionChoice -NotePropertyValue ([pscustomobject]@{ OsString = $opt.OsString; Lifecycle = $opt.Lifecycle; Option = $opt.Option }) -Force
+                $copies.Add($copy)
+                $meta.Add(@{ BaseIndex = $baseIndex; Option = $opt })
+            }
+        }
+        if ($copies.Count -eq 0) { continue }
+        $baseRows = @(Get-MigrationStrategyRows -StrategyInventory $eligible.ToArray() -Settings $Settings -OSField $field -PreferRelocateForLegacyOS:$PreferRelocateForLegacyOS -AsOf $AsOf)
+        $rows     = @(Get-MigrationStrategyRows -StrategyInventory $copies.ToArray() -Settings $Settings -OSField $field -PreferRelocateForLegacyOS:$PreferRelocateForLegacyOS -AsOf $AsOf)
+        for ($i = 0; $i -lt $rows.Count; $i++) {
+            $row = $rows[$i]; $m = $meta[$i]; $base = $baseRows[$m.BaseIndex]
+            $o = [ordered]@{ ScenarioKey = "$($row.VMName)|$($fieldLabel[$field])|$($m.Option.Option)" }
+            foreach ($p in $row.PSObject.Properties) { $o[$p.Name] = $p.Value }
+            $o['Version_Note'] = Get-VersionChangeNote -Base $base -Row $row -Option $m.Option -Settings $Settings -AsOf $AsOf
+            $all.Add([pscustomobject]$o)
+        }
+    }
+    return @($all.ToArray())
+}
+
+function Import-WorkbookChoices {
+    <#
+        Reads the client's choices from a previous output workbook (sheet Migration_Strategy), so a re-run keeps them:
+        returns @{ '<vm name, lower case>' = @{ OSField = <OS_Field_To_Use>; ExactVersion = <Exact_OS_Version> } }.
+        Values are validated by the exporter (an option that no longer exists is dropped with a warning).
+    #>
+    param([Parameter(Mandatory)] [string]$Path)
+    if (-not (Test-Path -LiteralPath $Path)) { throw "Previous workbook not found: $Path" }
+    $rows = @()
+    try { $rows = @(Import-Excel -Path $Path -WorksheetName 'Migration_Strategy') }
+    catch { Write-Warning "Could not read sheet Migration_Strategy from '$Path' - previous choices are not reused: $($_.Exception.Message)"; return @{} }
+    $out = @{}
+    foreach ($r in $rows) {
+        $name = Get-RowValue $r 'VMName'
+        if (-not $name) { continue }
+        $out[$name.ToLower()] = @{ OSField = (Get-RowValue $r 'OS_Field_To_Use'); ExactVersion = (Get-RowValue $r 'Exact_OS_Version') }
+    }
+    Write-Host ("Reused choices from {0}: {1} VM row(s)" -f (Split-Path $Path -Leaf), $out.Count) -ForegroundColor Green
+    return $out
 }
 
 #endregion
@@ -844,12 +1175,13 @@ function Get-MigrationStrategyRuleCatalog {
     # Stage, Rule, Rule name, Strategy, In plain words, What happens next, How sure, Register row, CountRule, CountText
     $defs = @(
         @('Before the rules', 'OS field', 'Which OS field is used', '-', "The OS can be read from two RVTools fields that sometimes disagree. Default: $(if ($Settings.DefaultOSField -eq 'VMwareTools') { 'VMware Tools (what the running server reports)' } else { 'Configuration file' }).", 'You can switch to the other field for all VMs (sheet OS_Choice) or per VM (column OS_Field_To_Use); all results update.', '-', '#17', '', ''),
+        @('Before the rules', 'OS version', 'Exact Windows version', '-', 'RVTools shows only "Windows 10", "Windows 11", "Windows Server 2012" (2012 or 2012 R2) or "Windows Server 2016 or later". Each covers versions with different support dates.', 'Check the version inside the VM (winver) and pick it in column Exact_OS_Version (sheet OS_Versions explains how); the dates, status and strategy update. Until then the RVTools label is used.', '-', '-', '', ''),
         @('1. Exclude', 'R01', 'Template', 'Excluded', 'A template is a master copy used to create VMs, not a running server.', 'Not counted or costed; rebuild it as an AWS image (AMI) if still needed.', 'High', '#1', 'static', ''),
         @('2. Decide the strategy (first match wins)', 'R02', 'Platform component', 'Retire', 'Part of the VMware or storage platform (vCenter, 3PAR, SimpliVity, vSAN witness). Not needed once workloads are on AWS.', 'Keep until the platform is switched off; take a final backup.', 'High', '-', 'R02', ''),
         @('2. Decide the strategy (first match wins)', 'R03', 'Windows desktop', 'Replace', 'Windows 7 / 8 / 10 / 11 (not Server). Desktop licences on EC2 are very restricted.', 'Move users to Amazon WorkSpaces; confirm your Microsoft licences.', 'Medium', '#15', 'R03', ''),
         @('2. Decide the strategy (first match wins)', 'R04', 'Vendor product or appliance', 'Replace (Retire if discontinued)', 'A known vendor product, or a VM you tagged as "appliance". Vendors supply their own AWS version.', 'Deploy the vendor''s AWS edition or SaaS; Retire products the vendor has ended.', 'Medium (Low if tag only)', '#14, #13', 'R04', ''),
         @('2. Decide the strategy (first match wins)', 'R05', 'Database server', $Settings.DatabaseStrategy, 'The name suggests a database (SQL, PostgreSQL, MySQL, MariaDB, MongoDB, Oracle).', $(if ($Settings.DatabaseStrategy -eq 'Manual Review') { "Every database is reviewed first; the team then chooses $dbTargets or EC2. Confirm the engine, version and features." } else { "Move the database to $dbTargets; keep it on EC2 if a feature is not supported. Confirm the engine." }), 'Low', 'new (Azure R07)', 'R05', ''),
-        @('2. Decide the strategy (first match wins)', 'R06', 'Old or 32-bit OS', $oldOs, "The OS is out of support, ends support before $($Settings.SupportCutoffDate), or is 32-bit.", 'Upgrade or rebuild on a supported 64-bit OS as part of the move.', 'High (Medium if from the configuration file)', '#18, #32, #11', 'R06', ''),
+        @('2. Decide the strategy (first match wins)', 'R06', 'Old or 32-bit OS', $oldOs, "The OS is out of support, ends support before $($Settings.SupportCutoffDate), or is 32-bit. Support dates come from the live lifecycle data (sheet Data_Sources) and follow the exact version you pick.", 'Upgrade or rebuild on a supported 64-bit OS as part of the move.', 'High (Medium if from the configuration file)', '#18, #32, #11', 'R06', ''),
         @('2. Decide the strategy (first match wins)', 'R07', 'OS not accepted by AWS', 'Rehost (blocked)', 'A supported OS that the AWS import tool does not accept (e.g. AlmaLinux, Rocky 8, Debian 8/9).', 'Upgrade the OS to an accepted version first, or rebuild.', 'Medium', '#19', 'R07', ''),
         @('2. Decide the strategy (first match wins)', 'R08', 'OS version not known', 'Rehost (check first)', 'RVTools shows the OS family but not the version (e.g. "Other Linux").', 'Check the version inside the server; re-run with the result.', 'Medium', '#20', 'R08', ''),
         @('2. Decide the strategy (first match wins)', 'R09', 'Supported OS', 'Rehost', 'Nothing above applies and AWS accepts the OS as it is.', 'Copy the server to Amazon EC2 as it is.', $Settings.DefaultRehostConfidence, '#17', 'R09', ''),
@@ -858,7 +1190,9 @@ function Get-MigrationStrategyRuleCatalog {
         @('3. Readiness checks (never change the strategy)', 'R12', 'DMZ server', '(no change)', 'The server is in the DMZ (internet-facing zone).', 'Moves in the last wave, after the AWS security perimeter is ready.', 'High', '#25', '', 'R12'),
         @('4. Final check', 'R13', 'Powered off', $Settings.PoweredOffStrategy, 'The VM is switched off. RVTools cannot say since when or why.', 'You confirm: still needed? If yes, the strategy shown in Alternative_Strategy; if not, Retire after a final backup.', 'Low', '#2', 'R13', '')
     )
+    $hasVersionChoices = $Settings.ContainsKey('VersionChoices') -and @($Settings.VersionChoices).Count -gt 0
     $rules = foreach ($d in $defs) {
+        if ($d[1] -eq 'OS version' -and -not $hasVersionChoices) { continue }
         [PSCustomObject][ordered]@{
             Stage = $d[0]; Rule = $d[1]; 'Rule name' = $d[2]; Strategy = $d[3]; 'In plain words' = $d[4]
             'What happens next' = $d[5]; 'How sure' = $d[6]; 'Register row' = $d[7]

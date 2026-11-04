@@ -40,10 +40,23 @@ function Export-MigrationReport {
         [System.Collections.IDictionary]$StrategyRowsByField = $null,
         [string]$DefaultOSField = 'VMwareTools',
         # Optional: Get-MigrationStrategyRuleCatalog output; only .Rules is written (sheet Strategy_Rules)
-        $RuleCatalog = $null
+        $RuleCatalog = $null,
+        # Optional (v3.0) exact-version chooser: Get-VersionChoiceCatalog and Get-VersionScenarioRows output. With both OS fields
+        # the workbook gets column Exact_OS_Version (dropdown), sheet OS_Versions and hidden sheet Strategy_Versions.
+        [array]$VersionCatalog = @(),
+        [array]$VersionScenarios = @(),
+        # Optional: Import-WorkbookChoices output (previous workbook) - pre-fills Exact_OS_Version and OS_Field_To_Use
+        [hashtable]$PriorChoices = @{},
+        # Optional: rows @{ Area; Source; Status; RetrievedAt; Detail } for sheet Data_Sources (where each value came from)
+        [array]$DataSources = @()
     )
 
     Write-Host "Writing output to $OutputPath ..." -ForegroundColor Cyan
+    # optional v3.0 inputs: $null (e.g. a feature that returned nothing) is the same as not given
+    $VersionCatalog   = @($VersionCatalog   | Where-Object { $null -ne $_ })
+    $VersionScenarios = @($VersionScenarios | Where-Object { $null -ne $_ })
+    $DataSources      = @($DataSources      | Where-Object { $null -ne $_ })
+    if ($null -eq $PriorChoices) { $PriorChoices = @{} }
 
     $EC2Export = $EC2Results | Select-Object `
         VMName, Powerstate, OS_ConfigFile, OS_VMwareTools, OS_Note, OS_Flag, OS_EndOfSupport, OS_Confidence, `
@@ -106,7 +119,11 @@ function Export-MigrationReport {
         [PSCustomObject]@{ Column = "Strategy_Confidence (Migration_Strategy)"; 'Value / Pattern' = "High / Medium / Low"; Meaning = "Strength of the RVTools evidence. Low = the decision depends on a fact RVTools does not contain (see Client_Confirmation)." }
         [PSCustomObject]@{ Column = "Rule_Applied (Migration_Strategy)"; 'Value / Pattern' = "R02-R10, R13"; Meaning = "The rule that decided the strategy (numbered in the order the rules run, see Strategy_Rules)." }
         [PSCustomObject]@{ Column = "Readiness (Migration_Strategy)"; 'Value / Pattern' = "Ready / Ready after prep / Awaiting client input / Blocked / Not migrating"; Meaning = "Blocked = a blocker must be fixed before export (e.g. raw/shared disk, OS not accepted by VM Import). Not migrating = Retire / Retain." }
-        [PSCustomObject]@{ Column = "OS_Status (Migration_Strategy)"; 'Value / Pattern' = "Supported / Supported - ends before cut-off / Extended support only (ESU/ELS/LTSS) / Unsupported - End of life / Unsupported - 32-bit OS / Verify - ..."; Meaning = "From the OS lifecycle table and the OS used (OS_Source: Override, VMwareTools or ConfigFile)." }
+        [PSCustomObject]@{ Column = "OS_Status (Migration_Strategy)"; 'Value / Pattern' = "Supported / Supported - ends before cut-off / Extended support only (ESU/ELS/LTSS) / Unsupported - End of life / Unsupported - 32-bit OS / Verify - ..."; Meaning = "From the OS lifecycle data and the OS used (OS_Source: Override, VMwareTools, ConfigFile, or 'Client choice (workbook)' when an exact version is picked in Exact_OS_Version)." }
+        [PSCustomObject]@{ Column = "Exact_OS_Version (Migration_Strategy)"; 'Value / Pattern' = "Not checked yet / <version> / n/a"; Meaning = "Yellow cell = RVTools shows only a family label (Windows 10, Windows 11, Windows Server 2012, Windows Server 2016 or later) that covers versions with different support dates. Check the version inside the VM (winver) and pick it from the list: the dates, OS status, strategy, target and readiness of the row update. Not checked yet = the RVTools label is used. n/a = the exact version is already known. Sheet OS_Versions lists every version with its dates." }
+        [PSCustomObject]@{ Column = "Version_Note (Migration_Strategy)"; 'Value / Pattern' = "Not checked yet: ... / Applied: ... / Strategy changes from ... to ... because ..."; Meaning = "What to check for the exact OS version, or what the chosen version changed and why." }
+        [PSCustomObject]@{ Column = "OS_Extended_Support_End (Migration_Strategy)"; 'Value / Pattern' = "<date> or blank"; Meaning = "End of the paid extended support (Microsoft ESU, Red Hat ELS, SUSE LTSS, Ubuntu Pro) when the vendor offers one; blank = none or not published." }
+        [PSCustomObject]@{ Column = "OS_EndOfSupport / OS_Extended_Support_End (Migration_Strategy)"; 'Value / Pattern' = "yyyy-MM-dd"; Meaning = "Support dates from the live lifecycle data when available (endoflife.date), else the cached copy, the snapshot shipped with the tool or the settings file - see sheet Data_Sources." }
         [PSCustomObject]@{ Column = "Recommended_Volume (Disk_Inventory)"; 'Value / Pattern' = "gp3 (VM-aggregated - verify thin/thick & IOPS needs per volume manually)"; Meaning = "Sizing is now a per-VM aggregate, so individual disk thin/thick-provisioning status is no longer available; a generic gp3 recommendation is given and per-volume detail must be verified manually if needed." }
     )
 
@@ -120,14 +137,65 @@ function Export-MigrationReport {
     $excludedColumns = @('Parameter_Map_Ref')
     $fieldLabel = @{ VMwareTools = 'VMware Tools'; ConfigFile = 'Configuration file' }
     $haveBoth   = ($null -ne $StrategyRowsByField) -and $StrategyRowsByField.Contains('VMwareTools') -and $StrategyRowsByField.Contains('ConfigFile')
+
+    # --- Exact OS version chooser (v3.0): which VM gets a dropdown, for which OS field, from which family ---
+    $haveVersions = $haveBoth -and @($VersionCatalog).Count -gt 0
+    $optionFamily = @{}; foreach ($fam in @($VersionCatalog)) { foreach ($opt in @($fam.Options)) { $optionFamily[[string]$opt.Option] = [string]$fam.Family } }
+    $vmFamilies   = @{}   # '<vm lower>' -> @{ '<OS field label>' = '<family>' }
+    foreach ($s in @($VersionScenarios)) {
+        $name = [string]$s.VMName
+        if (-not $s.ScenarioKey -or -not $s.ScenarioKey.StartsWith("$name|")) { continue }
+        $rest = $s.ScenarioKey.Substring($name.Length + 1); $cut = $rest.IndexOf('|')
+        if ($cut -lt 0) { continue }
+        $fl = $rest.Substring(0, $cut); $opt = $rest.Substring($cut + 1)
+        $k = $name.ToLower()
+        if (-not $vmFamilies.ContainsKey($k)) { $vmFamilies[$k] = @{} }
+        if ($optionFamily.ContainsKey($opt)) { $vmFamilies[$k][$fl] = $optionFamily[$opt] }
+    }
+    # The 'Not checked yet' note is shown only where the workbook has a dropdown for that VM and OS field
+    if ($haveBoth) {
+        foreach ($field in @('VMwareTools', 'ConfigFile')) {
+            foreach ($r in @($StrategyRowsByField[$field])) {
+                if ($r.PSObject.Properties['Version_Note'] -and $r.Version_Note) {
+                    $k = ([string]$r.VMName).ToLower()
+                    if (-not ($haveVersions -and $vmFamilies.ContainsKey($k) -and $vmFamilies[$k].ContainsKey($fieldLabel[$field]))) { $r.Version_Note = '' }
+                }
+            }
+        }
+    }
+    elseif ($StrategyRows.Count -gt 0) { foreach ($r in $StrategyRows) { if ($r.PSObject.Properties['Version_Note']) { $r.Version_Note = '' } } }
+    $dropFamilyByRow = @{}   # worksheet row -> family of the dropdown
+
     if ($StrategyRows.Count -gt 0) {
         # Rows stay in inventory order (sorted by VM name), so row N is the same VM on every strategy sheet
+        $rowNo = 1
         $visible = foreach ($r in $StrategyRows) {
+            $rowNo++
+            $k = ([string]$r.VMName).ToLower()
+            $prior = if ($PriorChoices.ContainsKey($k)) { $PriorChoices[$k] } else { $null }
             $o = [ordered]@{}
             foreach ($prop in $r.PSObject.Properties) {
                 if ($prop.Name -in $excludedColumns) { continue }
                 $o[$prop.Name] = $prop.Value
-                if ($haveBoth -and $prop.Name -eq 'OS_VMwareTools') { $o['OS_Field_To_Use'] = 'Default'; $o['OS_Field_Applied'] = $fieldLabel[$DefaultOSField] }
+                if ($haveBoth -and $prop.Name -eq 'OS_VMwareTools') {
+                    $fieldChoice = 'Default'
+                    if ($null -ne $prior -and $prior.OSField -in @('Default', 'VMware Tools', 'Configuration file')) { $fieldChoice = $prior.OSField }
+                    $o['OS_Field_To_Use'] = $fieldChoice; $o['OS_Field_Applied'] = $fieldLabel[$DefaultOSField]
+                }
+                if ($haveVersions -and $prop.Name -eq 'OS_Used') {
+                    $exact = 'n/a'
+                    if ($vmFamilies.ContainsKey($k) -and $vmFamilies[$k].Count -gt 0) {
+                        $fams = $vmFamilies[$k]
+                        $dropFamilyByRow[$rowNo] = if ($fams.ContainsKey($fieldLabel[$DefaultOSField])) { $fams[$fieldLabel[$DefaultOSField]] } else { @($fams.Values)[0] }
+                        $exact = 'Not checked yet'
+                        $want = if ($null -ne $prior) { [string]$prior.ExactVersion } else { '' }
+                        if ($want -and $want -notin @('Not checked yet', 'n/a')) {
+                            if ($optionFamily.ContainsKey($want) -and (@($fams.Values) -contains $optionFamily[$want])) { $exact = $want }
+                            else { Write-Warning "Previous choice '$want' for VM '$($r.VMName)' is not an option any more - reset to 'Not checked yet'." }
+                        }
+                    }
+                    $o['Exact_OS_Version'] = $exact
+                }
             }
             [PSCustomObject]$o
         }
@@ -136,6 +204,10 @@ function Export-MigrationReport {
             foreach ($field in @('VMwareTools', 'ConfigFile')) {
                 $StrategyRowsByField[$field] | Select-Object -Property * -ExcludeProperty $excludedColumns |
                     Export-Excel -Path $OutputPath -WorksheetName "Strategy_$field" -FreezeTopRow -BoldTopRow -Append
+            }
+            if ($haveVersions -and @($VersionScenarios).Count -gt 0) {
+                $VersionScenarios | Select-Object -Property * -ExcludeProperty $excludedColumns |
+                    Export-Excel -Path $OutputPath -WorksheetName 'Strategy_Versions' -FreezeTopRow -BoldTopRow -Append
             }
         }
     }
@@ -146,10 +218,16 @@ function Export-MigrationReport {
         Write-WrappedSheet -Rows $ruleSheet -OutputPath $OutputPath -WorksheetName "Strategy_Rules" -Widths @(24, 9, 24, 22, 60, 60, 18, 8) -CentreColumns 0
         # $RuleCatalog.Settings (the Strategy_Settings sheet) is no longer written: the settings values are not shown to the client
     }
+    if (@($DataSources).Count -gt 0) {
+        # Where every live value came from (live API / cache / snapshot / settings file) and any warning
+        $dsRows = @($DataSources | Select-Object Area, Source, Status, RetrievedAt, Detail)
+        Write-WrappedSheet -Rows $dsRows -OutputPath $OutputPath -WorksheetName 'Data_Sources' -Widths @(26, 40, 16, 18, 100) -CentreColumns 0
+    }
 
     if ($StrategyRows.Count -gt 0) {
         Set-StrategyWorkbookFormulas -OutputPath $OutputPath -HaveBoth:$haveBoth -DefaultLabel $fieldLabel[$DefaultOSField] -RuleCatalog $RuleCatalog `
-            -DifferentStrategyCount $(if ($haveBoth) { $n = 0; for ($i = 0; $i -lt $StrategyRowsByField['VMwareTools'].Count; $i++) { if ($StrategyRowsByField['VMwareTools'][$i].Migration_Strategy -ne $StrategyRowsByField['ConfigFile'][$i].Migration_Strategy) { $n++ } }; $n } else { 0 })
+            -DifferentStrategyCount $(if ($haveBoth) { $n = 0; for ($i = 0; $i -lt $StrategyRowsByField['VMwareTools'].Count; $i++) { if ($StrategyRowsByField['VMwareTools'][$i].Migration_Strategy -ne $StrategyRowsByField['ConfigFile'][$i].Migration_Strategy) { $n++ } }; $n } else { 0 }) `
+            -HaveVersions:$haveVersions -VersionCatalog $VersionCatalog -DropFamilyByRow $dropFamilyByRow
     }
 
     Write-Host "`n✅ Done! Output saved to: $OutputPath" -ForegroundColor Green
@@ -173,7 +251,11 @@ function Set-StrategyWorkbookFormulas {
         [switch]$HaveBoth,
         [string]$DefaultLabel = 'VMware Tools',
         $RuleCatalog = $null,
-        [int]$DifferentStrategyCount = 0
+        [int]$DifferentStrategyCount = 0,
+        # Exact OS version chooser: catalog (sheet OS_Versions) and the dropdown family of each Migration_Strategy row
+        [switch]$HaveVersions,
+        [array]$VersionCatalog = @(),
+        [hashtable]$DropFamilyByRow = @{}
     )
     $pkg = Open-ExcelPackage -Path $OutputPath
     $wb  = $pkg.Workbook
@@ -229,15 +311,55 @@ function Set-StrategyWorkbookFormulas {
             $hidden[$sheet] = $h
             $ws.Hidden = [OfficeOpenXml.eWorkSheetHidden]::Hidden
         }
-        $static = @('VMName', 'Powerstate', 'Cluster', 'Host', 'OS_ConfigFile', 'OS_VMwareTools', 'OS_Field_To_Use', 'OS_Field_Applied',
+        $static = @('VMName', 'Powerstate', 'Cluster', 'Host', 'OS_ConfigFile', 'OS_VMwareTools', 'OS_Field_To_Use', 'OS_Field_Applied', 'Exact_OS_Version',
                     'Current_vCPU', 'Current_RAM_GB', 'Current_Disk_GB', 'Largest_Disk_GiB', 'Current_Disk_Count', 'Current_NIC_Count')
         $dynamic = @($col.Keys | Where-Object { $_ -notin $static -and $hidden['Strategy_VMwareTools'].ContainsKey($_) })
         $ca = & $L $cApplied; $cc = & $L $cChoice
+
+        # ---------- Exact OS version: OS_Versions sheet, dropdowns, scenario lookup ----------
+        $vs = $null; $hv = @{}; $lastV = 0; $familyRange = @{}
+        $useVersions = $HaveVersions -and $col.ContainsKey('Exact_OS_Version')
+        if ($useVersions) {
+            $cExact = $col['Exact_OS_Version']; $ce = & $L $cExact; $cn = & $L $col['VMName']
+            $familyRange = @(New-OSVersionsSheet -Workbook $wb -VersionCatalog $VersionCatalog -ExactRange "Migration_Strategy!`$$ce`$2:`$$ce`$$last" -DropFamilyByRow $DropFamilyByRow) |
+                Where-Object { $_ -is [hashtable] } | Select-Object -Last 1
+            if ($null -eq $familyRange) { $familyRange = @{} }
+            $vs = $wb.Worksheets['Strategy_Versions']
+            if ($null -ne $vs -and $null -ne $vs.Dimension) {
+                for ($c = 1; $c -le $vs.Dimension.End.Column; $c++) { $hv[$vs.Cells[1, $c].Text] = $c }
+                $lastV = $vs.Dimension.End.Row
+                $vs.Hidden = [OfficeOpenXml.eWorkSheetHidden]::Hidden
+            }
+            $yellow = [System.Drawing.Color]::FromArgb(255, 242, 204); $grey = [System.Drawing.Color]::FromArgb(128, 128, 128)
+            for ($row = 2; $row -le $last; $row++) {
+                $cell = $ms.Cells[$row, $cExact]
+                if ($DropFamilyByRow.ContainsKey($row) -and $familyRange.ContainsKey($DropFamilyByRow[$row])) {
+                    $cell.Style.Fill.PatternType = [OfficeOpenXml.Style.ExcelFillStyle]::Solid
+                    $cell.Style.Fill.BackgroundColor.SetColor($yellow)
+                    $cell.Style.Font.Bold = $true
+                    $dvx = $ms.DataValidations.AddListValidation("$ce$row")
+                    $dvx.Formula.ExcelFormula = $familyRange[$DropFamilyByRow[$row]]
+                    $dvx.ShowErrorMessage = $true; $dvx.ErrorTitle = 'Exact OS version'
+                    $dvx.Error = 'Pick a version from the list. Sheet OS_Versions shows how to check it inside the VM.'
+                    $dvx.ShowInputMessage = $true; $dvx.PromptTitle = 'Exact OS version'
+                    $dvx.Prompt = 'Check the version inside the VM (winver) and pick it here. Dates, status and strategy update. See sheet OS_Versions.'
+                }
+                else { $cell.Style.Font.Color.SetColor($grey) }
+            }
+        }
+
         for ($row = 2; $row -le $last; $row++) {
             $ms.Cells[$row, $cApplied].Formula = "IF(`$$cc$row=""Default"",OS_Choice!`$C`$4,`$$cc$row)"
+            $rowVersions = $useVersions -and $lastV -ge 2 -and $DropFamilyByRow.ContainsKey($row)
             foreach ($name in $dynamic) {
                 $t = & $L $hidden['Strategy_VMwareTools'][$name]; $cf = & $L $hidden['Strategy_ConfigFile'][$name]
-                $ms.Cells[$row, $col[$name]].Formula = "IF(`$$ca$row=""Configuration file"",Strategy_ConfigFile!$cf$row,Strategy_VMwareTools!$t$row)&"""""
+                $base = "IF(`$$ca$row=""Configuration file"",Strategy_ConfigFile!$cf$row,Strategy_VMwareTools!$t$row)&"""""
+                if ($rowVersions -and $hv.ContainsKey($name)) {
+                    # chosen version: look the scenario up by '<VM>|<OS field applied>|<version>'; no match (Not checked yet) = RVTools label result
+                    $vc = & $L $hv[$name]
+                    $ms.Cells[$row, $col[$name]].Formula = "IFERROR(INDEX(Strategy_Versions!`$$vc`$2:`$$vc`$$lastV,MATCH(`$$cn$row&""|""&`$$ca$row&""|""&`$$ce$row,Strategy_Versions!`$A`$2:`$A`$$lastV,0))&"""",$base)"
+                }
+                else { $ms.Cells[$row, $col[$name]].Formula = $base }
             }
         }
     }
@@ -274,6 +396,7 @@ function Set-StrategyWorkbookFormulas {
         elseif ($m -eq 'VMs - Client confirmation needed') { $sm.Cells[$row, 2].Formula = "COUNTIF($(& $range 'Client_Confirmation'),""?*"")" }
         elseif ($m -like 'VMs - Powered off*(rule R13)')   { $sm.Cells[$row, 2].Formula = "COUNTIF($(& $range 'Rule_Applied'),""R13"")" }
         elseif ($m -like 'OS field deciding the strategy*' -and $HaveBoth) { $sm.Cells[$row, 2].Formula = 'OS_Choice!$C$4' }
+        elseif ($m -like 'VMs - Exact OS version not checked yet*' -and $col.ContainsKey('Exact_OS_Version')) { $sm.Cells[$row, 2].Formula = "COUNTIF($(& $range 'Exact_OS_Version'),""Not checked yet"")" }
     }
 
     $wb.CalcMode = [OfficeOpenXml.ExcelCalcMode]::Automatic
@@ -281,4 +404,133 @@ function Set-StrategyWorkbookFormulas {
     # Store calculated values too (Excel recalculates on open; this helps viewers that do not)
     try { [OfficeOpenXml.CalculationExtension]::Calculate($wb) } catch { Write-Warning "Formula pre-calculation skipped: $($_.Exception.Message) - Excel calculates on open." }
     Close-ExcelPackage $pkg
+}
+
+
+#---------------------------------------------------------------------
+# OS_VERSIONS SHEET - plain-language instructions + every version per family (the dropdown lists)
+#---------------------------------------------------------------------
+function New-OSVersionsSheet {
+    <#
+        Adds the visible sheet OS_Versions right after OS_Choice: a short "What to do" box, a live count of the VMs still
+        waiting for a choice, then one block per family listing every version with its support dates, status today and
+        source. Returns @{ '<family>' = 'OS_Versions!$B$x:$B$y' } - the dropdown list range of each family
+        (the first item is 'Not checked yet').
+    #>
+    param(
+        [Parameter(Mandatory)] $Workbook,
+        [Parameter(Mandatory)] [array]$VersionCatalog,
+        [Parameter(Mandatory)] [string]$ExactRange,
+        [hashtable]$DropFamilyByRow = @{}
+    )
+    $ws = $Workbook.Worksheets.Add('OS_Versions')
+    if ($null -ne $Workbook.Worksheets['OS_Choice']) { $Workbook.Worksheets.MoveAfter('OS_Versions', 'OS_Choice') }
+    elseif ($null -ne $Workbook.Worksheets['Migration_Strategy']) { $Workbook.Worksheets.MoveBefore('OS_Versions', 'Migration_Strategy') }
+    $solid  = [OfficeOpenXml.Style.ExcelFillStyle]::Solid
+    $navy   = [System.Drawing.Color]::FromArgb(31, 56, 100)
+    $paleB  = [System.Drawing.Color]::FromArgb(221, 235, 247)
+    $yellow = [System.Drawing.Color]::FromArgb(255, 242, 204)
+    $paleG  = [System.Drawing.Color]::FromArgb(242, 242, 242)
+    $thin   = [OfficeOpenXml.Style.ExcelBorderStyle]::Thin
+    $setText = {
+        param([int]$r, [string]$text, [switch]$Bold, [int]$Size = 0, [int]$Height = 0)
+        $ws.Cells[$r, 2].Value = $text
+        $ws.Cells[$r, 2, $r, 6].Merge = $true
+        $ws.Cells[$r, 2, $r, 6].Style.WrapText = $true
+        $ws.Cells[$r, 2, $r, 6].Style.VerticalAlignment = [OfficeOpenXml.Style.ExcelVerticalAlignment]::Top
+        if ($Bold) { $ws.Cells[$r, 2].Style.Font.Bold = $true }
+        if ($Size -gt 0) { $ws.Cells[$r, 2].Style.Font.Size = $Size }
+        if ($Height -gt 0) { $ws.Row($r).Height = $Height }
+    }
+
+    $ws.Cells['B1'].Value = 'Exact Windows version - pick it for each VM'
+    $ws.Cells['B1'].Style.Font.Bold = $true; $ws.Cells['B1'].Style.Font.Size = 16
+    & $setText 2 'RVTools shows only "Windows 10", "Windows 11", "Windows Server 2012" (used for both 2012 and 2012 R2) or "Windows Server 2016 or later". Each of these covers several versions with different support dates, and the date can change the migration strategy. Tell the tool the exact version and the workbook updates itself.' -Height 45
+
+    # ----- What to do (3 steps) -----
+    $ws.Cells['B4'].Value = 'What to do'
+    $ws.Cells[4, 2, 4, 6].Merge = $true
+    $ws.Cells[4, 2, 4, 6].Style.Font.Bold = $true; $ws.Cells[4, 2, 4, 6].Style.Font.Size = 13
+    $ws.Cells[4, 2, 4, 6].Style.Font.Color.SetColor([System.Drawing.Color]::White)
+    $ws.Cells[4, 2, 4, 6].Style.Fill.PatternType = $solid; $ws.Cells[4, 2, 4, 6].Style.Fill.BackgroundColor.SetColor($navy)
+    $steps = @(
+        @('1', 'Open sheet Migration_Strategy and find the yellow cells in column Exact_OS_Version. Only VMs whose exact version RVTools cannot show have one; all other VMs show n/a.'),
+        @('2', 'Check the version inside the VM. Windows 10 / 11: press Win+R, type winver and press Enter - it shows the version (for example "Version 22H2") and the edition (Pro, Enterprise, LTSC). Windows Server: run winver, or in PowerShell (Get-ComputerInfo).OsName.'),
+        @('3', 'Click the yellow cell and pick that version from the list. The support dates, OS status, migration strategy, AWS target and readiness of that VM update immediately, and so do the counts on Strategy_Rules and Summary_Metrics.')
+    )
+    $r = 5
+    foreach ($s in $steps) {
+        $ws.Cells[$r, 1].Value = $s[0]
+        $ws.Cells[$r, 1].Style.Font.Bold = $true; $ws.Cells[$r, 1].Style.Font.Size = 13
+        $ws.Cells[$r, 1].Style.HorizontalAlignment = [OfficeOpenXml.Style.ExcelHorizontalAlignment]::Center
+        $ws.Cells[$r, 1].Style.VerticalAlignment = [OfficeOpenXml.Style.ExcelVerticalAlignment]::Top
+        & $setText $r $s[1] -Height 34
+        $ws.Cells[$r, 1, $r, 6].Style.Fill.PatternType = $solid; $ws.Cells[$r, 1, $r, 6].Style.Fill.BackgroundColor.SetColor($paleB)
+        $r++
+    }
+    & $setText $r "Not sure yet? Leave 'Not checked yet': the tool keeps using the RVTools label (the result you see today). You can change a choice at any time. When the tool is run again, give it this workbook (-ReuseChoicesFrom) and your choices are kept." -Height 34
+    $ws.Cells[$r, 2].Style.Font.Italic = $true
+    $r += 2
+
+    # ----- live counter -----
+    $ws.Cells[$r, 2].Value = 'VMs still waiting for a version choice:'
+    $ws.Cells[$r, 2].Style.Font.Bold = $true
+    $ws.Cells[$r, 3].Formula = "COUNTIF($ExactRange,""Not checked yet"")"
+    $ws.Cells[$r, 3].Style.Font.Bold = $true; $ws.Cells[$r, 3].Style.Font.Size = 13
+    $ws.Cells[$r, 3].Style.HorizontalAlignment = [OfficeOpenXml.Style.ExcelHorizontalAlignment]::Left
+    $ws.Cells[$r, 3].Style.Fill.PatternType = $solid; $ws.Cells[$r, 3].Style.Fill.BackgroundColor.SetColor($yellow)
+    $r++
+    $sources = @($VersionCatalog | ForEach-Object { [string]$_.Source } | Where-Object { $_ } | Sort-Object -Unique)
+    $ws.Cells[$r, 2].Value = 'Where the dates come from:'
+    $ws.Cells[$r, 2].Style.Font.Bold = $true
+    $ws.Cells[$r, 3].Value = (($sources -join '; ') + '. Details on sheet Data_Sources.')
+    $ws.Cells[$r, 3, $r, 6].Merge = $true
+    $r += 2
+
+    # ----- one block per family -----
+    $countByFamily = @{}; foreach ($v in $DropFamilyByRow.Values) { if ($countByFamily.ContainsKey($v)) { $countByFamily[$v]++ } else { $countByFamily[$v] = 1 } }
+    $ranges = @{}
+    foreach ($fam in @($VersionCatalog)) {
+        $n = if ($countByFamily.ContainsKey($fam.Family)) { $countByFamily[$fam.Family] } else { 0 }
+        $ws.Cells[$r, 2].Value = "$($fam.Family)   ($n VM(s) in this export)"
+        $ws.Cells[$r, 2, $r, 6].Merge = $true
+        $ws.Cells[$r, 2, $r, 6].Style.Font.Bold = $true; $ws.Cells[$r, 2, $r, 6].Style.Font.Size = 12
+        $ws.Cells[$r, 2, $r, 6].Style.Font.Color.SetColor([System.Drawing.Color]::White)
+        $ws.Cells[$r, 2, $r, 6].Style.Fill.PatternType = $solid; $ws.Cells[$r, 2, $r, 6].Style.Fill.BackgroundColor.SetColor($navy)
+        $r++
+        & $setText $r ("How to check: " + [string]$fam.Help) -Height 30
+        $r++
+        $heads = @('Version (pick this in Exact_OS_Version)', 'Support ends', 'Paid extended support ends', 'Status today', 'Source of the dates')
+        for ($c = 0; $c -lt $heads.Count; $c++) { $ws.Cells[$r, (2 + $c)].Value = $heads[$c] }
+        $ws.Cells[$r, 2, $r, 6].Style.Font.Bold = $true
+        $ws.Cells[$r, 2, $r, 6].Style.Fill.PatternType = $solid; $ws.Cells[$r, 2, $r, 6].Style.Fill.BackgroundColor.SetColor($paleG)
+        $ws.Cells[$r, 2, $r, 6].Style.Border.Bottom.Style = $thin
+        $r++
+        $first = $r
+        $ws.Cells[$r, 2].Value = 'Not checked yet'
+        $ws.Cells[$r, 5].Value = 'The RVTools label is used (today''s result)'
+        $ws.Cells[$r, 2, $r, 6].Style.Font.Italic = $true
+        $r++
+        foreach ($opt in @($fam.Options)) {
+            $ws.Cells[$r, 2].Value = [string]$opt.Option
+            foreach ($pair in @(@(3, [string]$opt.EndOfSupport), @(4, [string]$opt.ExtendedEnd))) {
+                $d = ConvertTo-StrategyDate $pair[1]
+                if ($null -ne $d) { $ws.Cells[$r, $pair[0]].Value = $d; $ws.Cells[$r, $pair[0]].Style.Numberformat.Format = 'dd mmm yyyy' }
+                elseif ($pair[0] -eq 3) { $ws.Cells[$r, 3].Value = 'not published' }
+                $ws.Cells[$r, $pair[0]].Style.HorizontalAlignment = [OfficeOpenXml.Style.ExcelHorizontalAlignment]::Left
+            }
+            $ws.Cells[$r, 5].Value = [string]$opt.Status
+            $ws.Cells[$r, 6].Value = [string]$opt.DateSource
+            if ([string]$opt.Status -like 'Unsupported*') { $ws.Cells[$r, 5].Style.Font.Color.SetColor([System.Drawing.Color]::FromArgb(192, 0, 0)) }
+            elseif ([string]$opt.Status -like 'Supported - ends*' -or [string]$opt.Status -like 'Extended*') { $ws.Cells[$r, 5].Style.Font.Color.SetColor([System.Drawing.Color]::FromArgb(191, 143, 0)) }
+            elseif ([string]$opt.Status -eq 'Supported') { $ws.Cells[$r, 5].Style.Font.Color.SetColor([System.Drawing.Color]::FromArgb(0, 128, 0)) }
+            $r++
+        }
+        $ws.Cells[$first, 2, ($r - 1), 6].Style.Border.BorderAround($thin)
+        $ranges[$fam.Family] = "OS_Versions!`$B`$$($first):`$B`$$($r - 1)"
+        $r++
+    }
+    $ws.Column(1).Width = 4; $ws.Column(2).Width = 48; $ws.Column(3).Width = 16; $ws.Column(4).Width = 26; $ws.Column(5).Width = 36; $ws.Column(6).Width = 52
+    $ws.View.ShowGridLines = $false
+    return $ranges
 }
