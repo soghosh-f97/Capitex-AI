@@ -1,0 +1,631 @@
+{
+ "schema_version": "1.0",
+ "generated_at": "2026-11-04",
+ "description": "Offline fallback for the endoflife.date API (same release shape as https://endoflife.date/api/v1/products/<product>). Used only when the API and the local cache are unavailable. Dates as known on 2026-11-04 - verify against the vendor lifecycle pages.",
+ "products": {
+  "windows-server": {
+   "result": {
+    "name": "windows-server",
+    "releases": [
+     {
+      "name": "2025",
+      "label": "2025",
+      "releaseDate": "2024-11-01",
+      "isLts": true,
+      "eoasFrom": "2029-11-13",
+      "eolFrom": "2034-11-14",
+      "eoesFrom": null,
+      "source": "offline snapshot 2026-11-04 - verify"
+     },
+     {
+      "name": "2022",
+      "label": "2022",
+      "releaseDate": "2021-08-18",
+      "isLts": true,
+      "eoasFrom": "2026-10-13",
+      "eolFrom": "2031-10-14",
+      "eoesFrom": null,
+      "source": "offline snapshot 2026-11-04 - verify"
+     },
+     {
+      "name": "2019",
+      "label": "2019",
+      "releaseDate": "2018-11-13",
+      "isLts": true,
+      "eoasFrom": "2024-01-09",
+      "eolFrom": "2029-01-09",
+      "eoesFrom": null,
+      "source": "offline snapshot 2026-11-04 - verify"
+     },
+     {
+      "name": "2016",
+      "label": "2016",
+      "releaseDate": "2016-10-15",
+      "isLts": true,
+      "eoasFrom": "2022-01-11",
+      "eolFrom": "2027-01-12",
+      "eoesFrom": null,
+      "source": "offline snapshot 2026-11-04 - verify"
+     },
+     {
+      "name": "2012-r2",
+      "label": "2012 R2",
+      "releaseDate": "2013-11-25",
+      "isLts": true,
+      "eoasFrom": "2018-10-09",
+      "eolFrom": "2023-10-10",
+      "eoesFrom": "2026-10-13",
+      "source": "offline snapshot 2026-11-04 - verify"
+     },
+     {
+      "name": "2012",
+      "label": "2012",
+      "releaseDate": "2012-10-30",
+      "isLts": true,
+      "eoasFrom": "2018-10-09",
+      "eolFrom": "2023-10-10",
+      "eoesFrom": "2026-10-13",
+      "source": "offline snapshot 2026-11-04 - verify"
+     },
+     {
+      "name": "2008-r2-sp1",
+      "label": "2008 R2 SP1",
+      "releaseDate": "2011-02-22",
+      "isLts": true,
+      "eoasFrom": "2015-01-13",
+      "eolFrom": "2020-01-14",
+      "eoesFrom": "2023-01-10",
+      "source": "offline snapshot 2026-11-04 - verify"
+     },
+     {
+      "name": "2008-sp2",
+      "label": "2008 SP2",
+      "releaseDate": "2009-04-29",
+      "isLts": true,
+      "eoasFrom": "2015-01-13",
+      "eolFrom": "2020-01-14",
+      "eoesFrom": "2023-01-10",
+      "source": "offline snapshot 2026-11-04 - verify"
+     },
+     {
+      "name": "2003-r2-sp2",
+      "label": "2003 R2 SP2",
+      "releaseDate": "2007-03-13",
+      "isLts": true,
+      "eoasFrom": "2010-07-13",
+      "eolFrom": "2015-07-14",
+      "eoesFrom": null,
+      "source": "offline snapshot 2026-11-04 - verify"
+     }
+    ]
+   }
+  },
+  "windows": {
+   "result": {
+    "name": "windows",
+    "releases": [
+     {
+      "name": "11-25h2-e",
+      "label": "11 25H2 (E)",
+      "releaseDate": "2025-09-30",
+      "isLts": false,
+      "eoasFrom": null,
+      "eolFrom": "2028-10-10",
+      "eoesFrom": null,
+      "source": "offline snapshot 2026-11-04 - verify"
+     },
+     {
+      "name": "11-25h2-w",
+      "label": "11 25H2 (W)",
+      "releaseDate": "2025-09-30",
+      "isLts": false,
+      "eoasFrom": null,
+      "eolFrom": "2027-10-12",
+      "eoesFrom": null,
+      "source": "offline snapshot 2026-11-04 - verify"
+     },
+     {
+      "name": "11-24h2-e",
+      "label": "11 24H2 (E)",
+      "releaseDate": "2024-10-01",
+      "isLts": false,
+      "eoasFrom": null,
+      "eolFrom": "2027-10-12",
+      "eoesFrom": null,
+      "source": "offline snapshot 2026-11-04 - verify"
+     },
+     {
+      "name": "11-24h2-w",
+      "label": "11 24H2 (W)",
+      "releaseDate": "2024-10-01",
+      "isLts": false,
+      "eoasFrom": null,
+      "eolFrom": "2026-10-13",
+      "eoesFrom": null,
+      "source": "offline snapshot 2026-11-04 - verify"
+     },
+     {
+      "name": "11-24h2-e-lts",
+      "label": "11 24H2 (E) (LTSC)",
+      "releaseDate": "2024-10-01",
+      "isLts": true,
+      "eoasFrom": null,
+      "eolFrom": "2029-10-09",
+      "eoesFrom": null,
+      "source": "offline snapshot 2026-11-04 - verify"
+     },
+     {
+      "name": "11-24h2-iot-lts",
+      "label": "11 24H2 (IoT) (LTSC)",
+      "releaseDate": "2024-10-01",
+      "isLts": true,
+      "eoasFrom": null,
+      "eolFrom": "2034-10-10",
+      "eoesFrom": null,
+      "source": "offline snapshot 2026-11-04 - verify"
+     },
+     {
+      "name": "11-23h2-e",
+      "label": "11 23H2 (E)",
+      "releaseDate": "2023-10-31",
+      "isLts": false,
+      "eoasFrom": null,
+      "eolFrom": "2026-11-10",
+      "eoesFrom": null,
+      "source": "offline snapshot 2026-11-04 - verify"
+     },
+     {
+      "name": "11-23h2-w",
+      "label": "11 23H2 (W)",
+      "releaseDate": "2023-10-31",
+      "isLts": false,
+      "eoasFrom": null,
+      "eolFrom": "2025-11-11",
+      "eoesFrom": null,
+      "source": "offline snapshot 2026-11-04 - verify"
+     },
+     {
+      "name": "11-22h2-e",
+      "label": "11 22H2 (E)",
+      "releaseDate": "2022-09-20",
+      "isLts": false,
+      "eoasFrom": null,
+      "eolFrom": "2025-10-14",
+      "eoesFrom": null,
+      "source": "offline snapshot 2026-11-04 - verify"
+     },
+     {
+      "name": "11-22h2-w",
+      "label": "11 22H2 (W)",
+      "releaseDate": "2022-09-20",
+      "isLts": false,
+      "eoasFrom": null,
+      "eolFrom": "2024-10-08",
+      "eoesFrom": null,
+      "source": "offline snapshot 2026-11-04 - verify"
+     },
+     {
+      "name": "11-21h2-e",
+      "label": "11 21H2 (E)",
+      "releaseDate": "2021-10-04",
+      "isLts": false,
+      "eoasFrom": null,
+      "eolFrom": "2024-10-08",
+      "eoesFrom": null,
+      "source": "offline snapshot 2026-11-04 - verify"
+     },
+     {
+      "name": "11-21h2-w",
+      "label": "11 21H2 (W)",
+      "releaseDate": "2021-10-04",
+      "isLts": false,
+      "eoasFrom": null,
+      "eolFrom": "2023-10-10",
+      "eoesFrom": null,
+      "source": "offline snapshot 2026-11-04 - verify"
+     },
+     {
+      "name": "10-22h2",
+      "label": "10 22H2",
+      "releaseDate": "2022-10-18",
+      "isLts": false,
+      "eoasFrom": null,
+      "eolFrom": "2025-10-14",
+      "eoesFrom": "2028-10-10",
+      "source": "offline snapshot 2026-11-04 - verify",
+      "note": "Commercial ESU (paid, organisations) to 10 Oct 2028; consumer ESU ended 13 Oct 2026"
+     },
+     {
+      "name": "10-21h2-e",
+      "label": "10 21H2 (E)",
+      "releaseDate": "2021-11-16",
+      "isLts": false,
+      "eoasFrom": null,
+      "eolFrom": "2024-06-11",
+      "eoesFrom": null,
+      "source": "offline snapshot 2026-11-04 - verify"
+     },
+     {
+      "name": "10-21h2-w",
+      "label": "10 21H2 (W)",
+      "releaseDate": "2021-11-16",
+      "isLts": false,
+      "eoasFrom": null,
+      "eolFrom": "2023-06-13",
+      "eoesFrom": null,
+      "source": "offline snapshot 2026-11-04 - verify"
+     },
+     {
+      "name": "10-21h2-e-lts",
+      "label": "10 21H2 (E) (LTSC)",
+      "releaseDate": "2021-11-16",
+      "isLts": true,
+      "eoasFrom": null,
+      "eolFrom": "2027-01-12",
+      "eoesFrom": null,
+      "source": "offline snapshot 2026-11-04 - verify"
+     },
+     {
+      "name": "10-21h2-iot-lts",
+      "label": "10 21H2 (IoT) (LTSC)",
+      "releaseDate": "2021-11-16",
+      "isLts": true,
+      "eoasFrom": null,
+      "eolFrom": "2032-01-13",
+      "eoesFrom": null,
+      "source": "offline snapshot 2026-11-04 - verify"
+     },
+     {
+      "name": "10-1809-e-lts",
+      "label": "10 1809 (E) (LTSC)",
+      "releaseDate": "2018-11-13",
+      "isLts": true,
+      "eoasFrom": "2024-01-09",
+      "eolFrom": "2029-01-09",
+      "eoesFrom": null,
+      "source": "offline snapshot 2026-11-04 - verify"
+     },
+     {
+      "name": "10-1607-e-lts",
+      "label": "10 1607 (E) (LTSB)",
+      "releaseDate": "2016-08-02",
+      "isLts": true,
+      "eoasFrom": "2021-10-12",
+      "eolFrom": "2026-10-13",
+      "eoesFrom": null,
+      "source": "offline snapshot 2026-11-04 - verify"
+     },
+     {
+      "name": "10-1507-e-lts",
+      "label": "10 1507 (E) (LTSB)",
+      "releaseDate": "2015-07-29",
+      "isLts": true,
+      "eoasFrom": "2020-10-13",
+      "eolFrom": "2025-10-14",
+      "eoesFrom": null,
+      "source": "offline snapshot 2026-11-04 - verify"
+     },
+     {
+      "name": "8.1",
+      "label": "8.1",
+      "releaseDate": "2013-10-17",
+      "isLts": false,
+      "eoasFrom": "2018-01-09",
+      "eolFrom": "2023-01-10",
+      "eoesFrom": null,
+      "source": "offline snapshot 2026-11-04 - verify"
+     },
+     {
+      "name": "7-sp1",
+      "label": "7 SP1",
+      "releaseDate": "2011-02-22",
+      "isLts": false,
+      "eoasFrom": "2015-01-13",
+      "eolFrom": "2020-01-14",
+      "eoesFrom": "2023-01-10",
+      "source": "offline snapshot 2026-11-04 - verify"
+     }
+    ]
+   }
+  },
+  "rhel": {
+   "result": {
+    "name": "rhel",
+    "releases": [
+     {
+      "name": "10",
+      "label": "10",
+      "releaseDate": "2025-05-20",
+      "isLts": false,
+      "eoasFrom": null,
+      "eolFrom": "2035-05-31",
+      "eoesFrom": "2038-05-31",
+      "source": "offline snapshot 2026-11-04 - verify"
+     },
+     {
+      "name": "9",
+      "label": "9",
+      "releaseDate": "2022-05-17",
+      "isLts": false,
+      "eoasFrom": null,
+      "eolFrom": "2032-05-31",
+      "eoesFrom": "2035-05-31",
+      "source": "offline snapshot 2026-11-04 - verify"
+     },
+     {
+      "name": "8",
+      "label": "8",
+      "releaseDate": "2019-05-07",
+      "isLts": false,
+      "eoasFrom": null,
+      "eolFrom": "2029-05-31",
+      "eoesFrom": "2032-05-31",
+      "source": "offline snapshot 2026-11-04 - verify"
+     },
+     {
+      "name": "7",
+      "label": "7",
+      "releaseDate": "2014-06-10",
+      "isLts": false,
+      "eoasFrom": null,
+      "eolFrom": "2024-06-30",
+      "eoesFrom": "2028-06-30",
+      "source": "offline snapshot 2026-11-04 - verify"
+     },
+     {
+      "name": "6",
+      "label": "6",
+      "releaseDate": "2010-11-09",
+      "isLts": false,
+      "eoasFrom": null,
+      "eolFrom": "2020-11-30",
+      "eoesFrom": "2024-06-30",
+      "source": "offline snapshot 2026-11-04 - verify"
+     },
+     {
+      "name": "5",
+      "label": "5",
+      "releaseDate": "2007-03-15",
+      "isLts": false,
+      "eoasFrom": null,
+      "eolFrom": "2017-03-31",
+      "eoesFrom": "2020-11-30",
+      "source": "offline snapshot 2026-11-04 - verify"
+     }
+    ]
+   }
+  },
+  "oracle-linux": {
+   "result": {
+    "name": "oracle-linux",
+    "releases": [
+     {
+      "name": "9",
+      "label": "9",
+      "releaseDate": "2022-07-06",
+      "isLts": false,
+      "eoasFrom": null,
+      "eolFrom": "2032-06-30",
+      "eoesFrom": "2035-06-30",
+      "source": "offline snapshot 2026-11-04 - verify"
+     },
+     {
+      "name": "8",
+      "label": "8",
+      "releaseDate": "2019-07-18",
+      "isLts": false,
+      "eoasFrom": null,
+      "eolFrom": "2029-07-31",
+      "eoesFrom": "2032-07-31",
+      "source": "offline snapshot 2026-11-04 - verify"
+     },
+     {
+      "name": "7",
+      "label": "7",
+      "releaseDate": "2014-07-23",
+      "isLts": false,
+      "eoasFrom": null,
+      "eolFrom": "2024-12-31",
+      "eoesFrom": "2028-06-30",
+      "source": "offline snapshot 2026-11-04 - verify"
+     },
+     {
+      "name": "6",
+      "label": "6",
+      "releaseDate": "2011-02-14",
+      "isLts": false,
+      "eoasFrom": null,
+      "eolFrom": "2021-03-01",
+      "eoesFrom": "2024-12-31",
+      "source": "offline snapshot 2026-11-04 - verify"
+     }
+    ]
+   }
+  },
+  "centos": {
+   "result": {
+    "name": "centos",
+    "releases": [
+     {
+      "name": "8",
+      "label": "8",
+      "releaseDate": "2019-09-24",
+      "isLts": false,
+      "eoasFrom": null,
+      "eolFrom": "2021-12-31",
+      "eoesFrom": null,
+      "source": "offline snapshot 2026-11-04 - verify"
+     },
+     {
+      "name": "7",
+      "label": "7",
+      "releaseDate": "2014-07-07",
+      "isLts": false,
+      "eoasFrom": null,
+      "eolFrom": "2024-06-30",
+      "eoesFrom": null,
+      "source": "offline snapshot 2026-11-04 - verify"
+     },
+     {
+      "name": "6",
+      "label": "6",
+      "releaseDate": "2011-07-10",
+      "isLts": false,
+      "eoasFrom": null,
+      "eolFrom": "2020-11-30",
+      "eoesFrom": null,
+      "source": "offline snapshot 2026-11-04 - verify"
+     }
+    ]
+   }
+  },
+  "debian": {
+   "result": {
+    "name": "debian",
+    "releases": [
+     {
+      "name": "13",
+      "label": "13",
+      "releaseDate": "2025-08-09",
+      "isLts": false,
+      "eoasFrom": null,
+      "eolFrom": null,
+      "eoesFrom": "2030-06-30",
+      "source": "offline snapshot 2026-11-04 - verify"
+     },
+     {
+      "name": "12",
+      "label": "12",
+      "releaseDate": "2023-06-10",
+      "isLts": false,
+      "eoasFrom": null,
+      "eolFrom": "2026-06-10",
+      "eoesFrom": "2028-06-30",
+      "source": "offline snapshot 2026-11-04 - verify"
+     },
+     {
+      "name": "11",
+      "label": "11",
+      "releaseDate": "2021-08-14",
+      "isLts": false,
+      "eoasFrom": null,
+      "eolFrom": "2024-08-14",
+      "eoesFrom": "2026-08-31",
+      "source": "offline snapshot 2026-11-04 - verify"
+     },
+     {
+      "name": "10",
+      "label": "10",
+      "releaseDate": "2019-07-06",
+      "isLts": false,
+      "eoasFrom": null,
+      "eolFrom": "2022-09-10",
+      "eoesFrom": "2024-06-30",
+      "source": "offline snapshot 2026-11-04 - verify"
+     }
+    ]
+   }
+  },
+  "ubuntu": {
+   "result": {
+    "name": "ubuntu",
+    "releases": [
+     {
+      "name": "24.04",
+      "label": "24.04 'Noble Numbat'",
+      "releaseDate": "2024-04-25",
+      "isLts": true,
+      "eoasFrom": null,
+      "eolFrom": "2029-04-30",
+      "eoesFrom": "2034-04-30",
+      "source": "offline snapshot 2026-11-04 - verify (Canonical: ESM ends April)"
+     },
+     {
+      "name": "22.04",
+      "label": "22.04 'Jammy Jellyfish'",
+      "releaseDate": "2022-04-21",
+      "isLts": true,
+      "eoasFrom": null,
+      "eolFrom": "2027-04-30",
+      "eoesFrom": "2032-04-30",
+      "source": "offline snapshot 2026-11-04 - verify (Canonical: ESM ends April)"
+     },
+     {
+      "name": "20.04",
+      "label": "20.04 'Focal Fossa'",
+      "releaseDate": "2020-04-23",
+      "isLts": true,
+      "eoasFrom": null,
+      "eolFrom": "2025-05-31",
+      "eoesFrom": "2030-04-30",
+      "source": "offline snapshot 2026-11-04 - verify (Canonical: ESM ends April)"
+     },
+     {
+      "name": "18.04",
+      "label": "18.04 'Bionic Beaver'",
+      "releaseDate": "2018-04-26",
+      "isLts": true,
+      "eoasFrom": null,
+      "eolFrom": "2023-05-31",
+      "eoesFrom": "2028-04-30",
+      "source": "offline snapshot 2026-11-04 - verify (Canonical: ESM ends April)"
+     },
+     {
+      "name": "16.04",
+      "label": "16.04 'Xenial Xerus'",
+      "releaseDate": "2016-04-21",
+      "isLts": true,
+      "eoasFrom": null,
+      "eolFrom": "2021-04-30",
+      "eoesFrom": null,
+      "source": "offline snapshot 2026-11-04 - verify"
+     }
+    ]
+   }
+  },
+  "sles": {
+   "result": {
+    "name": "sles",
+    "releases": [
+     {
+      "name": "12.5",
+      "label": "12 SP5",
+      "releaseDate": "2019-12-09",
+      "isLts": false,
+      "eoasFrom": null,
+      "eolFrom": "2024-10-31",
+      "eoesFrom": "2027-10-31",
+      "source": "offline snapshot 2026-11-04 - verify"
+     }
+    ]
+   }
+  },
+  "rocky-linux": {
+   "result": {
+    "name": "rocky-linux",
+    "releases": [
+     {
+      "name": "9",
+      "label": "9",
+      "releaseDate": "2022-07-14",
+      "isLts": false,
+      "eoasFrom": null,
+      "eolFrom": "2032-05-31",
+      "eoesFrom": null,
+      "source": "offline snapshot 2026-11-04 - verify"
+     },
+     {
+      "name": "8",
+      "label": "8",
+      "releaseDate": "2021-06-21",
+      "isLts": false,
+      "eoasFrom": null,
+      "eolFrom": "2029-05-31",
+      "eoesFrom": null,
+      "source": "offline snapshot 2026-11-04 - verify"
+     }
+    ]
+   }
+  }
+ }
+}
